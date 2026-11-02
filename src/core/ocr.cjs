@@ -8,6 +8,22 @@ const exec = promisify(execFile);
 const { createWorker } = require('tesseract.js');
 const { matchAugments } = require('./matching.cjs');
 
+function normalizeOcrLines(lines, cropRect, croppedSize, originalSize) {
+  const convert = value => {
+    const box = value.bbox ? { x:value.bbox.x0, y:value.bbox.y0, width:value.bbox.x1-value.bbox.x0, height:value.bbox.y1-value.bbox.y0 } : value;
+    if (![box.x,box.y,box.width,box.height].every(Number.isFinite) || box.width <= 0 || box.height <= 0) return null;
+    return { text:String(value.text || ''), x:(cropRect.x + box.x * cropRect.width / croppedSize.width) / originalSize.width,
+      y:(cropRect.y + box.y * cropRect.height / croppedSize.height) / originalSize.height,
+      width:box.width * cropRect.width / croppedSize.width / originalSize.width,
+      height:box.height * cropRect.height / croppedSize.height / originalSize.height };
+  };
+  return (lines || []).map(line => {
+    const out=convert(line); if (!out) return null;
+    if (Array.isArray(line.words)) out.words=line.words.map(convert).filter(Boolean);
+    return out;
+  }).filter(Boolean);
+}
+
 class OcrReader {
   constructor(cacheDir, onProgress = () => {}, bitmapFactory = null) { this.cacheDir = cacheDir; this.onProgress = onProgress; this.bitmapFactory = bitmapFactory; this.worker = null; this.busy = false; }
   async init() {
@@ -47,8 +63,11 @@ class OcrReader {
         width: Math.floor(size.width * region.width), height: Math.floor(size.height * region.height) };
       let cropped = image.crop(rect);
       const cropSize = cropped.getSize();
-      if (Math.max(cropSize.width, cropSize.height) > 2200) {
-        const ratio = 2200 / Math.max(cropSize.width, cropSize.height);
+      // Small Chinese title strokes can be split into radicals by Windows OCR.
+      // Enlarge the actual card crop before recognition, with the same cap used
+      // for large captures. normalizeOcrLines maps the scaled boxes back.
+      const ratio = Math.min(1.5, 2200 / Math.max(cropSize.width, cropSize.height));
+      if (ratio !== 1) {
         cropped = cropped.resize({ width: Math.round(cropSize.width * ratio), height: Math.round(cropSize.height * ratio) });
       }
       if (process.platform === 'win32') {
@@ -60,6 +79,7 @@ class OcrReader {
           const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.resolve(__dirname, '../native/ocr.ps1'), '-ImagePath', filename], { windowsHide: true, timeout: 15000, maxBuffer: 256000 });
           const data = JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
           return { text: data.text.slice(0, 5000), matches: matchAugments(data.text, augments), engine: 'windows',
+            lines: normalizeOcrLines(data.lines, rect, cropped.getSize(), size), sourceSize: size,
             engineConfidence: null, capturedAt: new Date().toISOString() };
         } catch {
           this.onProgress('Windows 中文识别不可用，尝试备用识别模型…');
@@ -81,11 +101,13 @@ class OcrReader {
         cropped = this.bitmapFactory(bitmap, cropped.getSize());
       }
       const worker = await this.init();
-      const { data } = await worker.recognize(cropped.toPNG());
+      const { data } = await worker.recognize(cropped.toPNG(), {}, { text: true, blocks: true });
+      const lines = (data.blocks || []).flatMap(block => (block.paragraphs || []).flatMap(paragraph => paragraph.lines || []));
       return { text: data.text.slice(0, 5000), matches: matchAugments(data.text, augments),
+        lines: normalizeOcrLines(lines, rect, cropped.getSize(), size), sourceSize: size,
         engine: 'tesseract', engineConfidence: Math.round(data.confidence), capturedAt: new Date().toISOString() };
     } finally { this.busy = false; }
   }
   async close() { if (this.worker) await this.worker.terminate(); this.worker = null; }
 }
-module.exports = { OcrReader };
+module.exports = { OcrReader, normalizeOcrLines };

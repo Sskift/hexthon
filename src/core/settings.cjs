@@ -1,5 +1,5 @@
 const DEFAULTS = Object.freeze({ leaguePath: '', autoFollow: true, autoOverlay: true,
-  autoScan: false, manualChampion: 'ahri', opacity: 0.94, anchor: 'top-right', displayId: null,
+  autoScan: true, manualChampion: 'ahri', opacity: 0.94, anchor: 'top-right', displayId: null,
   ocrRegion: { x: 0.15, y: 0.25, width: 0.7, height: 0.48 } });
 function validateSettings(input, current = DEFAULTS) {
   const next = { ...DEFAULTS, ...current };

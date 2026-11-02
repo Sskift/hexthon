@@ -1,111 +1,102 @@
-# 海克斯大乱斗外置助手：调研与实现依据
+# 海克斯大乱斗外置助手：v0.2 调研与实现依据
 
-调研日期：2026-11-02。目标环境：Windows，用户确认使用腾讯国服客户端。以下区分公开文档、已抓取验证的数据，以及仍需实局验证的部分。
+更新日期：2026-11-02。目标环境：Windows、腾讯国服客户端。公开仓库：[Sskift/hexthon](https://github.com/Sskift/hexthon)。
 
-## 结论
+## 架构选择
 
-采用 Electron 独立透明置顶窗口承载浮层；以 OP.GG 提供静态攻略资料，以 LCU / Live Client 提供当前英雄与阶段，以本地 OCR 读取屏幕上可见的强化符文名称。这三类数据各自有清晰边界，不能用一个接口代替全部信息。
+Electron 独立透明置顶窗口承载浮层；OP.GG 提供表现档位、英雄排名和出装；LCU / Live Client 提供本机阶段、英雄、队伍和装备；局部 OCR 获取屏幕上可见的三选一卡片。Win32 辅助进程被动观察窗口位置与点击状态，将卡片几何和游戏窗口对齐。
+
+这些来源各自回答不同问题：攻略页面不知道当前装备，Live Client 没有可据此承诺的三选一接口，点击后画面消失也只足以形成“自动推断”，不能冒充本地接口确认。
 
 ## 参考项目
 
-仅参考公开说明与架构，没有直接复制其他项目的业务源码。
+参考了以下公开说明与架构，没有直接复制其业务源码。
 
-| 项目 | 公开说明中的做法 | 对本项目的启发 |
+| 项目 | 参考内容 | 本项目采用的方向 |
 | --- | --- | --- |
-| [OP.GG Desktop](https://op.gg/desktop/en/downloads) / [官方覆盖层支持表](https://help.op.gg/hc/en-us/articles/63676787584281-Overlay-support-by-game-mode) | 官方客户端提供按模式区分的覆盖层功能，海克斯模式页面也链接到下载入口 | 有真实产品形态可以参考；官方产品能力不代表开放第三方 API 或国服兼容承诺 |
-| [Sygnano/aram-mayhem-tracker](https://github.com/Sygnano/aram-mayhem-tracker) | Tauri/Rust、LCU、Live Client、局部截图文字识别、ARAMKit 统计；README 说明无边框／窗口模式要求 | 状态读取和卡片识别应分开；不同语言、缩放和客户端版本需要真实画面验证 |
-| [CyberKird/aram-mayhem-helper](https://github.com/CyberKird/aram-mayhem-helper) | Python 引擎配 Electron 界面，Windows 原生 OCR，按显示器定位 | Electron 适合独立浮层；原生 OCR 也是后续替代方案；不把“已提供的选项”和“最终选择”混为一谈 |
-| [zp96-cmd/mayhem-overlay](https://github.com/zp96-cmd/mayhem-overlay) | 透明置顶窗口、鼠标穿透、快捷键、Tesseract.js OCR、手动名称输入、布局设置 | 本地 JavaScript 栈可形成可运行原型，手动选择是识别失败时的必要补充 |
+| [OP.GG Desktop](https://op.gg/desktop/en/downloads) / [覆盖层支持说明](https://help.op.gg/hc/en-us/articles/63676787584281-Overlay-support-by-game-mode) | 按模式提供攻略覆盖层的产品形态 | 根据选人、普通对局和三选一卡片切换展示；官方客户端能力不等于第三方开放 API |
+| [Sygnano/aram-mayhem-tracker](https://github.com/Sygnano/aram-mayhem-tracker) | Tauri/Rust、LCU、Live Client、局部截图文字识别 | 对局状态读取与可见卡片识别分开，保留区域与缩放兼容边界 |
+| [CyberKird/aram-mayhem-helper](https://github.com/CyberKird/aram-mayhem-helper) | Python / Electron、Windows OCR、显示器定位 | 使用 Windows 原生 OCR；区分出现过的卡片和最终选中记录 |
+| [zp96-cmd/mayhem-overlay](https://github.com/zp96-cmd/mayhem-overlay) | 透明置顶、鼠标穿透、快捷键和 Tesseract.js | 独立 JavaScript 桌面浮层、本地 OCR 备用引擎与校正入口 |
 
-这些开源项目的统计来源和评分算法不同。本实现按用户要求使用 OP.GG，没有混入它们的 ARAMKit／aramgg 统计，也没有复用其自动确认、自动换英雄、写入装备页等操作。
+按需求保持 OP.GG 为表现数据来源，没有混入参考项目的 ARAMKit / aramgg 统计。没有自动选卡、自动换英雄、写入装备页或自动购买。
 
-## OP.GG 实际能取得什么
+## OP.GG 数据
 
-验证地址：
+已读取并验证的页面包括[模式首页](https://op.gg/zh-cn/lol/modes/aram-mayhem)、[阿狸符文](https://op.gg/zh-cn/lol/modes/aram-mayhem/ahri/augments)、[阿狸出装](https://op.gg/zh-cn/lol/modes/aram-mayhem/ahri/build)。
 
-- [模式首页](https://op.gg/zh-cn/lol/modes/aram-mayhem)
-- [九尾妖狐强化符文](https://op.gg/zh-cn/lol/modes/aram-mayhem/ahri/augments)
-- [九尾妖狐出装](https://op.gg/zh-cn/lol/modes/aram-mayhem/ahri/build)
+HTTP 页面包含 Next.js Flight 数据。程序仅解析其中的 JSON 字符串，不执行页面 JavaScript。英雄与符文来自结构化条目；出装从 HTML 表格提取物品 ID、名称和顺序。
 
-实际 HTTP 200 响应里包含 Next.js Flight 数据。程序只抽取其中的 JSON 字符串记录，不执行页面脚本。英雄和强化符文从结构化条目归一化；出装从 HTML 表格中读取图片 ID、名称及分组顺序。
+| 信息 | 实际取法与边界 |
+| --- | --- |
+| 英雄 | `champion_id`、`key`、`name`、`tier`、`rank`；快照含 173 个英雄 |
+| 符文 | `id`、`name`、`rarity`、`tier`、`desc`；首页含 263 个完整条目 |
+| 英雄专属档位 | `/{champion}/augments`；阿狸快照 209 条，与通用档位可以不同 |
+| 品质 | 当前值 1 白银、4 黄金、8 彩色；未知值不猜测 |
+| 出装 | `/{champion}/build` 的出门装、鞋子和核心装备分组 |
+| 补丁 | 页面标题与资源路径；当前内置快照为 16.21 |
+| 实际胜率 | 当前页面没有核实到可直接使用的明确字段，显示“未公开” |
 
-| 信息 | 当前取法 | 核实结果 |
-| --- | --- | --- |
-| 英雄标识 | `champion_id`、`key`、中文 `name` | 173 个英雄，可用数值 ID 对齐 LCU |
-| 强化符文 | `id`、`name`、`rarity`、`tier`、`desc`、图标 | 首页 263 个具备名称与品质的完整条目 |
-| 英雄专属符文 | `/{champion}/augments` | 阿狸 209 条，档位可与全局档位不同 |
-| 品质 | 当前页面的 `rarity` | 1 白银、4 黄金、8 彩色；未知值保留为未知，不能默认推断 |
-| 出装 | `/{champion}/build` 表格 | 出门装、鞋子、核心装备，保留页面原始顺序 |
-| 数据版本 | 页面标题和资源路径 | 当前实取为 16.21；不把本地日期当成补丁版本 |
-| 胜率和样本量 | 当前页面没有核实到可直接使用的明确统计字段 | 不展示；内部 `performance` 大于 100 的条目也存在，尤其不能直接当成胜率 |
+保留原描述中的 `?` 和翻译差异，不补全未知数值。`performance`、`popular` 不解释为胜率或选取率；部分 `performance` 超过 100，不能当作百分比。没有补造样本量。
 
-OP.GG 的名称和描述存在「?」变量及区域翻译差异。原文保留，不猜数值。页面有少数仅含 ID、缺少名称的条目，归一化时过滤。
+访问策略为每页缓存 6 小时、串行请求至少间隔 1 秒、20 秒超时、响应大小限制、失败后 2 分钟退避。失败保留最近成功缓存。启动先使用本地资料，自动监控不等待页面请求完成；只更新目录和当前英雄，避免抓取全英雄页面。请求不包含本地账号、认证或截图。
 
-访问策略：每个页面缓存 6 小时，串行请求、至少间隔 1 秒、20 秒超时、响应大小限制、失败后 2 分钟退避；失败不覆盖最近成功缓存。刷新只针对目录和当前英雄，避免每次启动抓取所有英雄。请求不包含本地账号、LCU 密码或截图。
+该来源属于公开页面解析，网页改版可能使解析失效，且没有声明是国服统计。来源 URL、时间和补丁随归一化数据保存。
 
-这条路径是已验证的公开页面解析，不是官方开放 API。网页改版会影响解析，因此校验失败时明确回退缓存；不能把页面可访问等同于获得商业再分发许可。
+## 描述性属性与推荐规则
 
-## 国服当前英雄和对局阶段
+[Riot Data Dragon](https://developer.riotgames.com/docs/lol#data-dragon) 提供公开英雄与装备属性。`scripts/sync-static.cjs` 获取与内置 OP.GG 补丁匹配的 `zh_CN/champion.json`、`item.json`；当前 `data/static/riot.json` 是 16.21.1，含 173 个英雄和 863 个物品记录。
 
-Riot 对 [League Client API 的说明](https://developer.riotgames.com/docs/lol#league-client-api) 明确将其列为未承诺支持的服务。不同国服版本需实测。
+Data Dragon 用于职业标签、基础属性、资源类型及装备合成关系，不提供本项目的胜率和排名。推荐指数是可解释的 0–100 规则分：OP.GG 档位为主，叠加已持有装备、已选海克斯联动和小幅职业修正。理由与分项随结果返回，缺少信息时降低置信度。
 
-1. 后台读取 `LeagueClientUx.exe` / `LeagueClient.exe` 的进程启动信息，仅寻找本机连接端口和 token；也支持指定 `lockfile`。不遍历磁盘、不读游戏进程内存。
-2. 对 `https://127.0.0.1:<port>` 发送固定白名单的 GET 请求，认证只留在主进程。
-3. `/lol-gameflow/v1/gameflow-phase` 获取阶段；`/lol-gameflow/v1/session` 获取队列和游戏标识；`/lol-champ-select/v1/session` 通过 `localPlayerCellId` 找到自己的英雄。
-4. 游戏开始后，使用 [Live Client Data API](https://developer.riotgames.com/docs/lol#game-client-api_live-client-data-api) 的 `activeplayer`、`playerlist`、`gamestats`。优先通过 `rawChampionName` 对齐英雄，避免中文展示名变化。
+选人候选仅来自自己的英雄与共享备选池，队伍分析先移除自己的原英雄，再逐个替换候选，避免把候选作为第六人或把队友锁定英雄视为可选项。前排、物理／法术方向与辅助覆盖属于职业规则估计，不是实测伤害占比或阵容胜率。
 
-游戏内接口地址是 `https://127.0.0.1:2999`，只在对局内可用。自签名证书例外仅作用于这些固定回环请求。
+刷新参考只比较同品质的可靠卡片和足够的英雄专属资料。未知剩余次数时仍可给出低置信度条件参考，明确“若仍有刷新次数”“次数未读取”；未知真实刷新池，因此不计算抽取概率或声称可用刷新次数。自动推断的已选联动可以参与计算，但注明记录可能不完整。
 
-目前按队列 2400 或队列名称中的 Mayhem／海克斯确认模式；普通 ARAM 队列 450 不自动开启。只取得 Live Client 信息时，不把 `gameMode=ARAM` 当作海克斯模式的充分证据，提供本局手动确认。
+## 本机连接
 
-## 当前三选一从哪里来
+[Riot League Client API 文档](https://developer.riotgames.com/docs/lol#league-client-api)将其列为未承诺支持的本地服务。国服补丁与权限可能影响兼容。
 
-官方 [Live Client 端点文档](https://developer.riotgames.com/docs/lol#game-client-api) 列出了当前玩家、玩家列表、装备、事件等内容，没有提供可据此承诺的“当前三选一强化符文”接口。几个参考项目也分别采用屏幕识别。由此选择本地 OCR，是本实现的工程判断，不代表断言所有区域客户端永远不存在新接口。
+1. 通过 `LeagueClientUx.exe` / `LeagueClient.exe` 的进程启动信息或指定 `lockfile` 发现本地端口与 token；不遍历磁盘、不读游戏进程内存。
+2. 对固定回环地址发起白名单 GET：阶段、队列／游戏标识、选人会话。利用 `localPlayerCellId` 标识自己，同时归一化己方英雄与共享备选池。
+3. 对局中使用 [Live Client Data API](https://developer.riotgames.com/docs/lol#game-client-api_live-client-data-api) 的 `activeplayer`、`playerlist`、`gamestats`，获取自己的装备、有限英雄属性和己方英雄。优先通过 `rawChampionName` 对齐英雄。
+4. 玩家身份只用于主进程内匹配自己，不进入公开应用状态。认证只存在内存；对自签名证书的例外仅适用于固定回环请求，外部 HTTPS 验证保持开启。
 
-本版链路：Electron `desktopCapturer` 获取窗口缩略图 → 选择游戏标题为 `League of Legends (TM) Client` 的窗口 → 按比例裁剪中央区域 → Windows 原生中文 OCR（失败时回退 Tesseract 中文模型）→ 规范化标点与空格 → OP.GG 名称词典匹配。
+LCU 的选人刷新次数不能当作游戏内海克斯刷新次数。当前没有从这些接口读到可靠的已选海克斯或海克斯刷新次数字段，保留未知，不填假数据。
 
-实测后调整了引擎优先级：本机已安装 `zh-Hans-CN` 的 Windows 识别语言，使用 [Windows.Media.Ocr.OcrEngine](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr.ocrengine) 在三条合成名称中得到 3/3 匹配；Tesseract 的同一测试只有 2/3 精确匹配，会误读「魔法飞弹」。因此以原生引擎为主，备用引擎结果仍需核对。原生引擎由隐藏的 PowerShell 辅助进程调用，读取裁剪区域的本地临时 PNG，完成后删除，不操作窗口焦点或模拟输入。
+队列 2400 或队列名称中的 Mayhem／海克斯可确认模式。仅有 Live Client、队列未知且模式包含 ARAM 时，可继续寻找三张完整海克斯卡片作为模式证据；已知普通 ARAM 队列不会直接自动开启海克斯浮层。
 
-仅游戏窗口图像进入识别器。Electron 在枚举缩略图时可能取得其他窗口的缩略图；这些不会进入 OCR，不保存、不上传。识别文本仅保留于本次运行内存。导入图片由用户主动点击选择。
+## 自动卡片识别和选择推断
 
-名称模糊匹配的相似度不是准确率。模糊结果只列为候选，用户确认；仅有恰好三个无歧义的名称结果时，才填入三个比较位。没有自动点击游戏卡片，也没有推断最终已选择的强化符文。
+链路如下：
 
-本版局限：窗口标题过滤可能受地区版本影响；DirectX 独占全屏、黑屏、遮挡、HUD 比例和游戏字体均可能影响识别。没有实际国服截图时，不能声称 OCR 已完成实局校准。
+1. 隐藏 Win32 辅助进程按进程及窗口句柄识别 LeagueClient 和游戏窗口，观察可见性、前台状态、矩形及自然鼠标按下事件。
+2. `desktopCapturer` 取得匹配游戏窗口句柄的缩略图，裁剪配置区域。按最多 1.5 倍缩放，最长边不超过 2200 像素。
+3. 使用 [Windows.Media.Ocr.OcrEngine](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr.ocrengine) 识别中文；不可用时回退 Tesseract 中文模型。原生辅助进程隐藏运行，临时裁剪 PNG 完成后删除。
+4. 用 OP.GG 完整名称匹配 OCR 行／词坐标，要求三个不同名称处于合理横向间距与同一高度。两次独立观察得到稳定三选一后才展示标注。
+5. 在稳定卡片内部观察到自然点击，随后两次 OCR 确认卡片消失，才添加“自动推断”已选记录。下沿可能含刷新按钮，不作为选卡点击区域；卡片替换、失焦、过期观察不作为选择证据。
 
-## 外置浮层怎么做
+每轮 OCR 完成约 1.3 秒后再运行下一轮。观察超过 6 秒没有更新时失效卡片几何和待确认点击，避免对旧画面的鼠标位置作推断。识别过程中不自动点击、不移动鼠标、不抢焦点。
 
-按 [Electron 窗口文档](https://www.electronjs.org/docs/latest/api/browser-window) 创建独立 `BrowserWindow`：
+Electron 枚举窗口时可能取得其他窗口缩略图，但只有选中的游戏窗口进入 OCR，其他窗口图像不保存、不上传。识别文字保留于运行内存；本机诊断只记录阶段、窗口状态、卡片／装备 ID 等状态，不包含认证凭据。
 
-```js
-new BrowserWindow({
-  transparent: true,
-  frame: false,
-  alwaysOnTop: true,
-  focusable: false,
-  skipTaskbar: true,
-  show: false,
-});
-overlay.setIgnoreMouseEvents(true, { forward: true });
-overlay.showInactive();
-```
+本机原生中文 OCR 已通过合成名称图片验证；这不等于已用实际卡片完成校准。截图黑屏、独占全屏、遮挡、游戏字体、UI 缩放和选择速度仍会影响结果。
 
-[Electron 官方鼠标穿透说明](https://www.electronjs.org/docs/latest/tutorial/custom-window-interactions#click-through-windows) 支持这种外置窗口路径。控制面板与浮层分开，搜索和设置在控制面板完成，浮层只读，不占用游戏输入。
+## 外置浮层与自绘界面
 
-窗口按 Electron 的显示器逻辑坐标定位，支持负坐标的第二显示器。当前可设置四个角落和透明度，不需要移动用户鼠标。默认程序仅托盘启动；自动浮层仅在确认的海克斯选人／对局阶段出现。独占全屏下不保证覆盖；当前也没有实现对游戏窗口矩形的自动跟随。
+按 [Electron BrowserWindow 文档](https://www.electronjs.org/docs/latest/api/browser-window)创建独立透明、无边框、置顶窗口，使用 `focusable:false`、`skipTaskbar:true`、`setIgnoreMouseEvents(true)` 和 `showInactive()`。控制面板与只读浮层分开，符合 [Electron 鼠标穿透窗口方案](https://www.electronjs.org/docs/latest/tutorial/custom-window-interactions#click-through-windows)。
 
-## 为什么先选 Electron
+Win32 物理坐标转换为 Electron DIP 坐标，浮层随窗口位置和大小更新，支持 DPI 与负坐标副屏。选人面板放在客户端侧边；游戏普通状态使用侧边摘要；三卡稳定时显示三个独立标注，优先置于估算卡片上方，空间不足时置于下方。卡片主体来自 OCR 标题网格的估算，因此仍需实局位置验证。
 
-| 方案 | 优势 | 本次取舍 |
-| --- | --- | --- |
-| Electron | 透明窗口、热键、网页 UI、Node 网络与 OCR 集成快；现有项目可参考 | 作为本次可运行原型；代价是包体与内存较大 |
-| Tauri + Rust | 应用壳轻，可细致控制 Windows API | 适合后续优化；需要额外处理 Rust、WebView2、OCR 和 Windows 打包链 |
-| .NET / WPF | Windows 原生置顶窗与 WinRT OCR 方便 | 也是可行替代，UI 及页面解析体系需要另建 |
-| Overwolf 平台 | 已有覆盖层与游戏事件生态 | 需要核实支持的模式、区域、审核和分发要求，本次不引入平台依赖 |
+游戏失去前台、最小化或画面失效时隐藏浮层。窗口观察使用普通 Win32 读取，不注入、不安装 Hook、驱动或模拟输入。控制面板使用自绘标题栏、下拉弹层和设置界面；托盘单击和右键均打开面板，不使用系统托盘上下文菜单。
 
-外置窗口、官方接口和 OCR 并不自动等于平台审核通过。[Riot 第三方产品政策](https://developer.riotgames.com/policies/general) 要求产品登记与审核；[近期官方内存访问说明](https://support.riotgames.com/en-us/riot/performance/game-memory-access-removed-for-third-party-apps)也强调向允许的接口迁移。实现因此限定为公开资料与本机只读接口，未采用注入、Hook、内存读取或自动输入。国服公开分发还需独立核对腾讯要求。
+选择 Electron 的理由是透明窗口、网页 UI、网络解析和本地 OCR 可直接组合；代价为包体和内存。Tauri / Rust、.NET / WPF 是可替代的桌面实现，本版不额外引入其他覆盖层平台。
 
-## 验证层级
+## 验证范围
 
-本机已验证公开页面可访问、结构化数据解析、缓存回退、名称匹配、LCU 凭据解析与白名单、隐藏窗口中的 UI 交互与浮层渲染。OCR 通过合成中文图片验证时，报告会明确写为合成测试。
+- 已验证公开 OP.GG 页面解析、缓存回退、来源字段、官方静态数据、只读接口白名单、阵容替换、未知值和联动／刷新规则。
+- 已验证合成 OCR 几何、稳定观察、自然点击后的消失推断、刷新替换和过期帧处理。界面测试在隐藏 Electron 窗口中检查自绘控制与浮层，不占用用户鼠标或焦点。
+- 已在当前机器实际发现 LeagueClient 窗口，LCU 返回 `EndOfGame` 与队列 `2400`。
+- 真实海克斯选人流程、不同分辨率的卡片区域、真实卡片叠加与长时间自动识别仍需用户实局验证，不能由合成测试替代。
 
-真实国服登录、选人、进入海克斯对局、不同分辨率卡片识别、快捷键在游戏前台的可用性，以及实际游戏画面上方的叠加，均需要在对应环境中实测。当前没有运行中的游戏，这些结论保持待验证。
+`%APPDATA%\Hexthon\runtime-status.json` 可用于后台排查连接、阶段、窗口、卡片与识别状态。`.qa` 测试产物、`.research` 调研临时文件及本机配置不上传仓库，也不进入打包产物。

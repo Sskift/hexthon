@@ -86,7 +86,8 @@ test('window bounds support negative monitor coordinates and small screens',()=>
 });
 test('settings validate OCR rectangles and clamp opacity',()=>{
   assert.equal(validateSettings({opacity:4}).opacity,1);
-  assert.equal(validateSettings({autoScan:'true'}).autoScan,false);
+  assert.equal(validateSettings({autoScan:'true'}, {autoScan:false}).autoScan,false);
+  assert.equal(validateSettings({}).autoScan,true);
   assert.throws(()=>validateSettings({ocrRegion:{x:.9,y:0,width:.3,height:.3}}),/区域/);
   assert.throws(()=>validateSettings({ocrRegion:{x:NaN,y:0,width:.3,height:.3}}),/区域/);
 });

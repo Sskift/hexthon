@@ -66,44 +66,78 @@ function championFromSelect(session) {
   return session?.myTeam?.find(p => p.cellId === session.localPlayerCellId)?.championId || null;
 }
 function normalizeName(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]/g, ''); }
-function championFromLive(active, players, champions) {
-  const player = (players || []).find(p => (active?.riotId && p.riotId === active.riotId) || (active?.summonerName && p.summonerName === active.summonerName));
+function activePlayerFromLive(active, players) {
+  return (players || []).find(p => (active?.riotId && p.riotId === active.riotId) || (active?.summonerName && p.summonerName === active.summonerName)) || null;
+}
+function championIdFromPlayer(player, champions) {
   if (!player) return null;
   const raw = (player.rawChampionName || '').replace(/^game_character_displayname_/i, '');
   const keys = [raw, player.championName].map(normalizeName).filter(Boolean);
   return champions.find(c => keys.includes(normalizeName(c.key)) || keys.includes(normalizeName(c.name)))?.id || null;
 }
+function championFromLive(active, players, champions) { return championIdFromPlayer(activePlayerFromLive(active, players), champions); }
+function draftFromSession(session) {
+  const localPlayerCellId = Number.isInteger(session?.localPlayerCellId) ? session.localPlayerCellId : null;
+  const team = (session?.myTeam || []).map(p => ({ championId: Number(p.championId) || null,
+    cellId: p.cellId, isSelf: localPlayerCellId !== null && p.cellId === localPlayerCellId }));
+  // The shared bench and own champion are actionable choices; teammates' locked picks are not.
+  const bench = [...new Set((session?.benchChampions || []).map(p => Number(p.championId)).filter(id => id > 0))];
+  const self = team.find(p => p.isSelf);
+  const availableChampionIds = [...new Set([self?.championId, ...bench].filter(id => id > 0))];
+  const rawRerolls = session?.rerollsRemaining ?? session?.myTeam?.find(p => p.cellId === localPlayerCellId)?.rerollsRemaining;
+  return { team, bench, availableChampionIds, localPlayerCellId,
+    rerollsRemaining: Number.isInteger(rawRerolls) && rawRerolls >= 0 ? rawRerolls : null };
+}
+function liveContext(active, players, champions) {
+  const own = activePlayerFromLive(active, players);
+  const stats = {};
+  for (const key of ['abilityPower', 'attackDamage', 'attackSpeed', 'attackRange', 'critChance', 'maxHealth', 'armor', 'magicResist', 'resourceMax', 'abilityHaste']) {
+    const value = active?.championStats?.[key]; if (typeof value === 'number' && Number.isFinite(value)) stats[key] = value;
+  }
+  if (typeof active?.championStats?.resourceType === 'string') stats.resourceType = active.championStats.resourceType;
+  return { ownItems: own && Array.isArray(own.items) ? own.items.filter(item => Number(item.itemID) > 0).map(item => ({ id: Number(item.itemID), name: String(item.displayName || ''), count: Number(item.count) || 1 })) : null,
+    ownChampStats: Object.keys(stats).length ? stats : null,
+    ownSelectedAugmentIds: null, selectedAugmentsSource: 'unavailable',
+    team: own ? players.filter(p => p.team === own.team).map((p, i) => ({ championId: championIdFromPlayer(p, champions), cellId: i, isSelf: p === own })) : [],
+  };
+}
 class LeagueReader {
-  constructor() { this.connection = null; this.nextDiscovery = 0; }
+  constructor(options = {}) { this.connection = null; this.nextDiscovery = 0; this.discover = options.discover || discoverConnection; this.get = options.get || localGet; }
   reset() { this.connection = null; this.nextDiscovery = 0; }
   async poll(settings, champions) {
     if (!this.connection && Date.now() >= this.nextDiscovery) {
       this.nextDiscovery = Date.now() + 15000;
-      this.connection = await discoverConnection(settings.leaguePath);
+      this.connection = await this.discover(settings.leaguePath);
     }
     let phase = 'Disconnected', session = null, championId = null, lcuConnected = false;
+    let draft = draftFromSession(null), context = { ownItems: null, ownChampStats: null, ownSelectedAugmentIds: null, selectedAugmentsSource: 'unavailable' };
     if (this.connection) {
       try {
-        phase = await localGet('/lol-gameflow/v1/gameflow-phase', this.connection);
+        phase = await this.get('/lol-gameflow/v1/gameflow-phase', this.connection);
         lcuConnected = true;
-        session = await localGet('/lol-gameflow/v1/session', this.connection).catch(() => null);
-        if (phase === 'ChampSelect') championId = championFromSelect(await localGet('/lol-champ-select/v1/session', this.connection).catch(() => null));
+        session = await this.get('/lol-gameflow/v1/session', this.connection).catch(() => null);
+        if (phase === 'ChampSelect') {
+          const selection = await this.get('/lol-champ-select/v1/session', this.connection).catch(() => null);
+          championId = championFromSelect(selection); draft = draftFromSession(selection);
+        }
       } catch { this.connection = null; }
     }
     let liveConnected = false, level = null, gameTime = null, gameMode = null, gameVersion = null;
     // Live Client Data can work even if the launcher is unavailable in a regional client.
-    const live = await Promise.allSettled([localGet('/liveclientdata/activeplayer'), localGet('/liveclientdata/playerlist'), localGet('/liveclientdata/gamestats')]);
+    const live = await Promise.allSettled([this.get('/liveclientdata/activeplayer'), this.get('/liveclientdata/playerlist'), this.get('/liveclientdata/gamestats')]);
     if (live[0].status === 'fulfilled' && live[1].status === 'fulfilled') {
       liveConnected = true; phase = 'InProgress';
       championId = championFromLive(live[0].value, live[1].value, champions) || championId;
+      context = liveContext(live[0].value, live[1].value, champions);
+      draft = { ...draft, team: context.team, availableChampionIds: championId ? [championId] : [], bench: [], localPlayerCellId: context.team.find(p => p.isSelf)?.cellId ?? null, rerollsRemaining: null };
       level = live[0].value.level || null;
       if (live[2].status === 'fulfilled') {
         gameTime = live[2].value.gameTime; gameMode = live[2].value.gameMode; gameVersion = live[2].value.gameVersion || null;
       }
     }
-    return { phase, lcuConnected, liveConnected, championId, isMayhem: isMayhem(session),
+    return { phase, lcuConnected, liveConnected, championId, isMayhem: isMayhem(session), ...draft, ...context,
       queueId: session?.gameData?.queue?.id || null, level, gameTime, gameMode, gameVersion,
       gameId: session?.gameData?.gameId || null, checkedAt: new Date().toISOString() };
   }
 }
-module.exports = { parseLockfile, parseCommandLine, discoverConnection, localGet, isMayhem, championFromSelect, championFromLive, LeagueReader };
+module.exports = { parseLockfile, parseCommandLine, discoverConnection, localGet, isMayhem, championFromSelect, championFromLive, draftFromSession, liveContext, LeagueReader };

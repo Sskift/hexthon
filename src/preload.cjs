@@ -10,5 +10,7 @@ contextBridge.exposeInMainWorld('hexthon', {
   refresh: () => call('refresh'), setOffers: ids => call('set-offers', ids), scan: () => call('scan'),
   importImage: () => call('import-image'), toggleOverlay: () => call('toggle-overlay'),
   confirmMode: value => call('confirm-mode', value), openSource: kind => call('open-source', kind),
+  windowAction: action => call('window-action', action), setSelectedAugments: ids => call('set-selected-augments', ids),
+  confirmSelectedAugment: id => call('confirm-selected-augment', id),
   onState: callback => { const listener = (_event, value) => callback(value); ipcRenderer.on('state', listener); return () => ipcRenderer.removeListener('state', listener); },
 });
