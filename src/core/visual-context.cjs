@@ -27,6 +27,10 @@ function captureMatchesContext(frame, context) {
   return Boolean(context?.useClient && frame?.hwnd === context.hwnd && frame.pid === context.pid && frame.dpi === context.dpi &&
     frame.clientRect && ['x', 'y', 'width', 'height'].every(k => frame.clientRect[k] === context.rect[k]));
 }
+function captureIsFresh(frame, now = Date.now(), maxAgeMs = 2500) {
+  const at=Date.parse(frame?.capturedAt);
+  return Number.isFinite(at)&&Number.isFinite(now)&&Number.isFinite(maxAgeMs)&&maxAgeMs>=0&&at<=now+250&&now-at<=maxAgeMs;
+}
 function trackingPresentation(result, lastOffer) {
   const offer = {cards: result.cards || [], stable: Boolean(result.stable),
     present: lastOffer?.cards?.length === 3, pendingSelection: result.pendingSelection || null};
@@ -34,4 +38,4 @@ function trackingPresentation(result, lastOffer) {
   // independent: hide immediately while retaining its two-sample pick logic.
   return {offer, signature: JSON.stringify({result, present: offer.present})};
 }
-module.exports = {visualContext, sameVisualContext, isCurrentVisualContext, captureMatchesContext, trackingPresentation};
+module.exports = {visualContext, sameVisualContext, isCurrentVisualContext, captureMatchesContext, captureIsFresh, trackingPresentation};

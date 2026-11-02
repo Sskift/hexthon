@@ -131,7 +131,7 @@ class OcrReader {
     }
     return this.worker;
   }
-  async read(image, region, augments, {allowSmall=false,allowFallback=true}={}) {
+  async read(image, region, augments, {allowSmall=false,allowFallback=true,scale=1.5,invert=false}={}) {
     if(this.closed)throw new Error('识别已关闭');
     if (this.busy) throw new Error('识别正在进行，请稍候');
     this.busy = true;const started=performance.now(),capturedAt=new Date().toISOString();
@@ -145,9 +145,14 @@ class OcrReader {
       // Small Chinese title strokes can be split into radicals by Windows OCR.
       // Enlarge the actual card crop before recognition, with the same cap used
       // for large captures. normalizeOcrLines maps the scaled boxes back.
-      const ratio = Math.min(1.5, 2200 / Math.max(cropSize.width, cropSize.height));
+      const ratio = Math.min(Number.isFinite(scale)?Math.max(1,Math.min(4,scale)):1.5, 2200 / Math.max(cropSize.width, cropSize.height));
       if (ratio !== 1) {
         cropped = cropped.resize({ width: Math.round(cropSize.width * ratio), height: Math.round(cropSize.height * ratio) });
+      }
+      if(invert&&this.bitmapFactory){
+        const bitmap=Buffer.from(cropped.toBitmap());
+        for(let i=0;i<bitmap.length;i+=4){bitmap[i]=255-bitmap[i];bitmap[i+1]=255-bitmap[i+1];bitmap[i+2]=255-bitmap[i+2];}
+        cropped=this.bitmapFactory(bitmap,cropped.getSize());
       }
       const cropMs=performance.now()-started;
       if (process.platform === 'win32') {

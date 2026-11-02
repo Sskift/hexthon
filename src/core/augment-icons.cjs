@@ -2,11 +2,15 @@
 // inputs, or card-click evidence is used by this recognizer.
 const HUD_REGION=Object.freeze({x:.14,y:.76,width:.32,height:.24});
 const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
-function validImage(image){return image&&Number.isInteger(image.width)&&Number.isInteger(image.height)&&image.width>0&&image.height>0&&image.bgraBuffer?.length>=image.width*image.height*4;}
+function validImage(image){return image&&Number.isInteger(image.width)&&Number.isInteger(image.height)&&image.width>0&&image.height>0&&image.width<=8192&&image.height<=8192&&image.width*image.height<=16777216&&(Buffer.isBuffer(image.bgraBuffer)||image.bgraBuffer instanceof Uint8Array)&&image.bgraBuffer.length===image.width*image.height*4;}
+function imageRegion(image){
+  const r=image?.region||{x:0,y:0,width:1,height:1};
+  return r&&['x','y','width','height'].every(k=>Number.isFinite(r[k]))&&r.x>=0&&r.y>=0&&r.width>0&&r.height>0&&r.x+r.width<=1.000001&&r.y+r.height<=1.000001?r:null;
+}
 const samplers=new WeakMap();
 function sampler(image){
   if(samplers.has(image))return samplers.get(image);
-  const frame=image.width>400&&image.height>250;
+  const frame=!image.region&&image.width>400&&image.height>250;
   const x0=frame?Math.max(0,Math.floor(image.width*HUD_REGION.x)-8):0,y0=frame?Math.max(0,Math.floor(image.height*HUD_REGION.y)-8):0;
   const x1=frame?Math.min(image.width,Math.ceil(image.width*(HUD_REGION.x+HUD_REGION.width))+8):image.width;
   const width=x1-x0,height=image.height-y0,stride=width+1,table=new Float64Array((width+1)*(height+1)),b=image.bgraBuffer;
@@ -43,9 +47,14 @@ function prepareTemplates(templates=[]){
 }
 function findHudSquares(image,region=HUD_REGION){
   if(!validImage(image))return [];
-  const step=Math.max(1,Math.round(image.height/720));
-  const left=Math.floor(image.width*region.x),top=Math.floor(image.height*region.y);
-  const columns=Math.floor(image.width*region.width/step),rows=Math.floor(image.height*region.height/step);
+  const captured=imageRegion(image);if(!captured)return [];
+  const fullHeight=image.height/captured.height,step=Math.max(1,Math.round(fullHeight/720));
+  const left=Math.max(0,Math.floor((region.x-captured.x)/captured.width*image.width));
+  const top=Math.max(0,Math.floor((region.y-captured.y)/captured.height*image.height));
+  const right=Math.min(image.width,Math.ceil((region.x+region.width-captured.x)/captured.width*image.width));
+  const bottom=Math.min(image.height,Math.ceil((region.y+region.height-captured.y)/captured.height*image.height));
+  if(right<=left||bottom<=top)return [];
+  const columns=Math.floor((right-left)/step),rows=Math.floor((bottom-top)/step);
   const mask=new Uint8Array(columns*rows),data=image.bgraBuffer;
   for(let y=0;y<rows;y++)for(let x=0;x<columns;x++){
     const px=Math.min(image.width-1,left+x*step),py=Math.min(image.height-1,top+y*step),p=(py*image.width+px)*4;
@@ -66,7 +75,7 @@ function findHudSquares(image,region=HUD_REGION){
       }
     }
     const width=(maxX-minX+1)*step,height=(maxY-minY+1)*step,area=(maxX-minX+1)*(maxY-minY+1);
-    if(width<image.height*.018||width>image.height*.065||height<image.height*.018||height>image.height*.065||width/height<.78||width/height>1.28||count/area<.3)continue;
+    if(width<fullHeight*.018||width>fullHeight*.065||height<fullHeight*.018||height>fullHeight*.065||width/height<.78||width/height>1.28||count/area<.3)continue;
     result.push({x:left+minX*step,y:top+minY*step,width,height,fill:count/area});
   }
   // Slots appear in rows in the player's augment tray. Requiring a similarly
@@ -74,11 +83,38 @@ function findHudSquares(image,region=HUD_REGION){
   return result.filter(a=>result.some(b=>a!==b&&Math.abs(a.y-b.y)<Math.max(a.height,b.height)*.18&&b.width/a.width>.75&&b.width/a.width<1.33&&Math.abs(a.x-b.x)>a.width*.8&&Math.abs(a.x-b.x)<a.width*2.6))
     .sort((a,b)=>b.y-a.y||a.x-b.x).slice(0,12);
 }
+function hudSlots(candidates){
+  // Empty cells establish position too. Never number only the matched icons:
+  // an occluded left icon would otherwise turn the middle one into slot zero.
+  const rows=[];
+  for(const box of [...candidates].sort((a,b)=>a.y-b.y||a.x-b.x)){
+    let row=rows.find(r=>Math.abs(r[0].y-box.y)<Math.min(r[0].height,box.height)*.2);
+    if(!row){row=[];rows.push(row);}row.push(box);
+  }
+  const layouts=[];
+  for(let i=0;i<rows.length;i++)for(let j=i+1;j<rows.length;j++){
+    const pair=[rows[i],rows[j]].map(row=>row.slice().sort((a,b)=>a.x-b.x));
+    const anchor=pair.find(row=>row.length===3);
+    if(!anchor||pair.some(row=>row.length<2||row.length>3))continue;
+    const size=anchor.reduce((sum,r)=>sum+r.width,0)/3,gap=pair[1][0].y-pair[0][0].y;
+    if(gap<size*.85||gap>size*1.9||anchor.some(r=>r.width/size<.8||r.width/size>1.2))continue;
+    const gapX=anchor[1].x-anchor[0].x,gapX2=anchor[2].x-anchor[1].x;
+    if(gapX<size*.95||gapX>size*1.9||Math.abs(gapX-gapX2)>size*.2)continue;
+    const assigned=new Map();let valid=true;
+    pair.forEach((row,r)=>{const used=new Set();for(const box of row){
+      const col=anchor.findIndex(a=>Math.abs(a.x-box.x)<size*.25&&Math.abs(a.width-box.width)<size*.25);
+      if(col<0||used.has(col)){valid=false;break;}used.add(col);assigned.set(box,`hud:${r*3+col}`);
+    }});
+    if(valid)layouts.push(assigned);
+  }
+  return layouts.length===1?layouts[0]:new Map();
+}
 function matchAugmentIcons(image,templates,{observedAt=new Date().toISOString(),minScore=.94,minMargin=.032}={}){
-  const none={matches:[],observedAt};if(!validImage(image)||!templates?.length)return none;
-  const candidates=findHudSquares(image),matches=[];
+  const none={matches:[],observedAt,complete:false};if(!validImage(image)||!templates?.length)return none;
+  const region=imageRegion(image);if(!region)return none;
+  const candidates=findHudSquares(image),slots=hudSlots(candidates),matches=[];
   for(const candidate of candidates){
-    const delta=Math.max(1,Math.round(image.height/720));
+    const delta=Math.max(1,Math.round(image.height/region.height/720));
     const size=Math.round((candidate.width+candidate.height)/2),rough=[];
     for(const scale of [-delta,0,delta])for(const dx of [-delta,0,delta])for(const dy of [-delta,0,delta]){
       const rect={x:candidate.x+dx,y:candidate.y+dy,width:size+scale,height:size+scale};
@@ -101,11 +137,11 @@ function matchAugmentIcons(image,templates,{observedAt=new Date().toISOString(),
     refined.sort((a,b)=>b.score-a.score);const best=refined[0],margin=best.score-(refined[1]?.score??0),group=templates[best.t];
     if(best.score<minScore||margin<minMargin||group.entries.length!==1)continue;
     const entry=group.entries[0];if(matches.some(match=>match.id===entry.id))continue;
-    matches.push({...entry,score:Number(best.score.toFixed(4)),margin:Number(margin.toFixed(4)),confidence:'visual',
-      rect:{x:best.rect.x/image.width,y:best.rect.y/image.height,width:best.rect.width/image.width,height:best.rect.height/image.height},
+    matches.push({...entry,score:Number(best.score.toFixed(4)),margin:Number(margin.toFixed(4)),confidence:'visual',slot:slots.get(candidate)||null,
+      rect:{x:region.x+best.rect.x/image.width*region.width,y:region.y+best.rect.y/image.height*region.height,width:best.rect.width/image.width*region.width,height:best.rect.height/image.height*region.height},
       evidence:'己方底部强化栏图标与 OP.GG 模板像素匹配'});
   }
-  return {matches:matches.sort((a,b)=>a.rect.y-b.rect.y||a.rect.x-b.rect.x),observedAt};
+  return {matches:matches.sort((a,b)=>a.rect.y-b.rect.y||a.rect.x-b.rect.x),observedAt,complete:false};
 }
 class AugmentIconTracker{
   constructor({stableReads=2,maxGapMs=8000,now=()=>Date.now()}={}){this.stableReads=stableReads;this.maxGapMs=maxGapMs;this.now=now;this.reset();}
@@ -116,18 +152,21 @@ class AugmentIconTracker{
     if(!active)return this.invalidate();const stamp=detection?.observedAt;if(stamp==null||stamp===this.lastSample)return this.snapshot();
     const now=this.now();if(this.lastAt!==null&&now-this.lastAt>this.maxGapMs)this.candidates.clear();this.lastAt=now;this.lastSample=stamp;
     this.replacedIds=[];
-    this.matches=(detection.matches||[]).filter(m=>Number.isInteger(m.id)&&m.confidence==='visual'&&Number.isFinite(m.score)&&m.score>=.94&&m.score<=1.001&&Number.isFinite(m.margin)&&m.margin>=.032&&m.rect&&[m.rect.x,m.rect.y,m.rect.width,m.rect.height].every(Number.isFinite)&&m.rect.width>0&&m.rect.height>0&&m.rect.x>=HUD_REGION.x&&m.rect.x+m.rect.width<=HUD_REGION.x+HUD_REGION.width&&m.rect.y>=HUD_REGION.y&&m.rect.y+m.rect.height<=1.001);
+    this.matches=(detection.matches||[]).filter(m=>Number.isInteger(m.id)&&m.confidence==='visual'&&Number.isFinite(m.score)&&m.score>=.94&&m.score<=1.001&&Number.isFinite(m.margin)&&m.margin>=.032&&m.rect&&[m.rect.x,m.rect.y,m.rect.width,m.rect.height].every(Number.isFinite)&&m.rect.width>0&&m.rect.height>0&&m.rect.x>=HUD_REGION.x&&m.rect.x+m.rect.width<=HUD_REGION.x+HUD_REGION.width&&m.rect.y>=HUD_REGION.y&&m.rect.y+m.rect.height<=1.001)
+      .map(m=>({...m,slot:/^hud:[0-5]$/.test(m.slot)?m.slot:null}));
     const next=new Map();
     for(const match of this.matches){const old=this.candidates.get(match.id),same=old&&Math.abs(old.match.rect.x-match.rect.x)<.02&&Math.abs(old.match.rect.y-match.rect.y)<.02;
       const value={match,reads:same?old.reads+1:1};next.set(match.id,value);
       if(value.reads>=this.stableReads){
         for(const [id,previous] of this.selected){
-          if(id!==match.id&&Math.abs(previous.rect.x-match.rect.x)<Math.min(previous.rect.width,match.rect.width)*.45&&Math.abs(previous.rect.y-match.rect.y)<Math.min(previous.rect.height,match.rect.height)*.45){this.selected.delete(id);this.replacedIds.push(id);}
+          const sameSlot=match.slot&&previous.slot?match.slot===previous.slot:Math.abs(previous.rect.x-match.rect.x)<Math.min(previous.rect.width,match.rect.width)*.45&&Math.abs(previous.rect.y-match.rect.y)<Math.min(previous.rect.height,match.rect.height)*.45;
+          if(id!==match.id&&sameSlot){this.selected.delete(id);this.replacedIds.push(id);}
         }
-        this.selected.set(match.id,{...match,evidence:'连续两帧己方强化栏图标与 OP.GG 模板像素匹配',detectedAt:this.selected.get(match.id)?.detectedAt||new Date(now).toISOString()});
+        const previous=this.selected.get(match.id),near=previous&&Math.abs(previous.rect.x-match.rect.x)<match.rect.width*.45&&Math.abs(previous.rect.y-match.rect.y)<match.rect.height*.45;
+        this.selected.set(match.id,{...match,slot:match.slot||(near?previous.slot:null),evidence:'连续两帧己方强化栏图标与 OP.GG 模板像素匹配',observedAt:stamp,detectedAt:previous?.detectedAt||new Date(now).toISOString()});
       }
     }
     this.candidates=next;return this.snapshot();
   }
 }
-module.exports={HUD_REGION,prepareTemplates,matchAugmentIcons,findHudSquares,AugmentIconTracker,descriptor,correlation};
+module.exports={HUD_REGION,prepareTemplates,matchAugmentIcons,findHudSquares,hudSlots,AugmentIconTracker,descriptor,correlation};

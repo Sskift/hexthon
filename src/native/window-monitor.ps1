@@ -34,10 +34,10 @@ public static class HexthonWindowReader {
         public string hwnd; public int pid, x, y, width, height, dpi;
         public bool visible, minimized, foreground; public Bounds clientRect;
     }
-    public sealed class CursorInfo { public int x, y; public bool active, leftDown, leftPressed; public long pressId; }
+    public sealed class CursorInfo { public int x, y; public bool active, leftDown, leftPressed; public long pressId, shopPressId; }
     public sealed class State { public WindowInfo game, client; public CursorInfo cursor; public string observedAt; }
     static List<IntPtr> games = new List<IntPtr>(), clients = new List<IntPtr>();
-    static long nextDiscovery = 0, pressId = 0; static bool previousDown = false;
+    static long nextDiscovery = 0, pressId = 0, shopPressId = 0; static bool previousDown = false, previousShop = false;
 
     public static void Initialize() {
         // Only changes DPI interpretation for this hidden helper thread.
@@ -90,7 +90,7 @@ public static class HexthonWindowReader {
         if (now>=nextDiscovery) { Discover(); nextDiscovery=now+1500; }
         IntPtr foreground=GetForegroundWindow(); uint foregroundPid; GetWindowThreadProcessId(foreground,out foregroundPid);
         var game=Best(games,foreground,foregroundPid); var client=Best(clients,foreground,foregroundPid);
-        var cursor=new CursorInfo { pressId=pressId };
+        var cursor=new CursorInfo { pressId=pressId, shopPressId=shopPressId };
         if (game!=null && game.foreground && game.visible && !game.minimized) {
             Point point;
             if (GetCursorPos(out point)) { cursor.x=point.X; cursor.y=point.Y; cursor.active=true; }
@@ -98,7 +98,13 @@ public static class HexthonWindowReader {
             cursor.leftDown=GetAsyncKeyState(button)<0;
             cursor.leftPressed=cursor.leftDown&&!previousDown;
             if (cursor.leftPressed) cursor.pressId=++pressId;
+            // Passive hint only. A P press accelerates verification; it never
+            // establishes that the shop is open and never sends keyboard input.
+            bool shopDown=GetAsyncKeyState(0x50)<0;
+            if(shopDown&&!previousShop)cursor.shopPressId=++shopPressId;
+            previousShop=shopDown;
         }
+        else { previousShop=false; }
         previousDown=cursor.leftDown;
         return new State { game=game, client=client, cursor=cursor, observedAt=DateTime.UtcNow.ToString("o") };
     }

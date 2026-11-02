@@ -1,6 +1,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {prepareTemplates,matchAugmentIcons,AugmentIconTracker}=require('../src/core/augment-icons.cjs');
+const {HUD_REGION,prepareTemplates,matchAugmentIcons,AugmentIconTracker}=require('../src/core/augment-icons.cjs');
+const {AugmentIconWorker}=require('../src/core/augment-icon-worker.cjs');
 function bitmap(width,height,color=[130,140,180]){const bgraBuffer=Buffer.alloc(width*height*4);for(let p=0;p<bgraBuffer.length;p+=4){bgraBuffer[p]=color[2];bgraBuffer[p+1]=color[1];bgraBuffer[p+2]=color[0];bgraBuffer[p+3]=255;}return{width,height,bgraBuffer};}
 function icon(kind){const image=bitmap(24,24,[16,34,28]);for(let y=4;y<20;y++)for(let x=4;x<20;x++){const white=kind===1?Math.abs(x-12)<3||Math.abs(y-12)<3:Math.abs(x-y)<2||Math.abs(x+y-23)<2;if(white){const p=(y*24+x)*4;image.bgraBuffer[p]=210;image.bgraBuffer[p+1]=235;image.bgraBuffer[p+2]=245;}}return image;}
 function paste(frame,image,x,y){for(let yy=0;yy<image.height;yy++)image.bgraBuffer.copy(frame.bgraBuffer,((y+yy)*frame.width+x)*4,yy*image.width*4,(yy+1)*image.width*4);}
@@ -49,4 +50,53 @@ test('a stable replacement reports the old slot ID without erasing other selecte
   tracker.observe({observedAt:'c',matches:[hit(3),hit(2,.3)]});
   const result=tracker.observe({observedAt:'d',matches:[hit(3),hit(2,.3)]});
   assert.deepEqual(result.replacedIds,[1]);assert.deepEqual(result.selected.map(m=>m.id).sort(),[2,3]);
+});
+
+function grid(){const image=scene();for(let col=0;col<3;col++)paste(image,bitmap(24,24,[16,34,28]),200+col*34,574);return image;}
+function hudCrop(frame){
+  const x=Math.round(frame.width*HUD_REGION.x),y=Math.round(frame.height*HUD_REGION.y),width=Math.round(frame.width*HUD_REGION.width),height=Math.round(frame.height*HUD_REGION.height);
+  const bgraBuffer=Buffer.alloc(width*height*4);
+  for(let row=0;row<height;row++)frame.bgraBuffer.copy(bgraBuffer,row*width*4,((y+row)*frame.width+x)*4,((y+row)*frame.width+x+width)*4);
+  return{width,height,bgraBuffer,region:{...HUD_REGION},clientRect:{width:frame.width,height:frame.height},capturedAt:'sample-one'};
+}
+test('small captured HUD ROI gives the same client coordinates and canonical slots as a full image',()=>{
+  const full=matchAugmentIcons(grid(),templates),cropped=matchAugmentIcons(hudCrop(grid()),templates);
+  assert.deepEqual(cropped.matches.map(m=>[m.id,m.slot]),[[1,'hud:0'],[2,'hud:1']]);
+  for(let i=0;i<full.matches.length;i++)for(const key of ['x','y','width','height'])assert.ok(Math.abs(full.matches[i].rect[key]-cropped.matches[i].rect[key])<.000001);
+  assert.equal(cropped.complete,false);
+});
+test('partial HUD occlusion cannot renumber remaining icons or imply an empty loadout',()=>{
+  const image=grid();paste(image,bitmap(24,24),200,540);
+  const result=matchAugmentIcons(hudCrop(image),templates);
+  assert.deepEqual(result.matches.map(m=>[m.id,m.slot]),[[2,'hud:1']]);
+  assert.equal(result.complete,false);
+  const oneRow=matchAugmentIcons(hudCrop(scene()),templates);
+  assert.ok(oneRow.matches.every(m=>m.slot===null),'one row alone cannot prove its logical row number');
+});
+test('canonical slot replacement survives HUD movement, while unknown slots retain geometry safety',()=>{
+  const tracker=new AugmentIconTracker();
+  for(const observedAt of ['a','b'])tracker.observe({observedAt,matches:[{...hit(1,.25),slot:'hud:0'}]});
+  for(const observedAt of ['c','d'])tracker.observe({observedAt,matches:[{...hit(2,.30),slot:'hud:0'}]});
+  assert.deepEqual(tracker.snapshot().selected.map(m=>m.id),[2]);
+  assert.deepEqual(tracker.snapshot().replacedIds,[1]);
+});
+test('worker is lazy, processes supplied ROI off-thread, refuses overlap and closes permanently',async()=>{
+  const worker=new AugmentIconWorker({templates});assert.equal(worker.worker,null);
+  const frame=hudCrop(grid()),original=Buffer.from(frame.bgraBuffer),pending=worker.read(frame);
+  await assert.rejects(worker.read(frame),/BUSY/);
+  const result=await pending;
+  assert.deepEqual(result.matches.map(m=>[m.id,m.slot]),[[1,'hud:0'],[2,'hud:1']]);
+  assert.equal(result.observedAt,'sample-one');assert.deepEqual(frame.bgraBuffer,original);
+  const processWorker=worker.worker;await worker.read({...frame,capturedAt:'sample-two'});assert.equal(worker.worker,processWorker);
+  await worker.close();await assert.rejects(worker.read(frame),/CLOSED/);
+});
+test('worker timeout and close reject in-flight work and terminate only the owned worker',async()=>{
+  const {EventEmitter}=require('node:events');const workers=[];
+  const createWorker=()=>{const fake=new EventEmitter();fake.ref=fake.unref=()=>{};fake.postMessage=()=>{};fake.terminated=0;
+    fake.terminate=async()=>{fake.terminated++;};workers.push(fake);return fake;};
+  const worker=new AugmentIconWorker({templates,timeoutMs:50,createWorker});
+  await assert.rejects(worker.read({...hudCrop(grid()),bgraBuffer:Buffer.alloc(3)}),/BITMAP/);assert.equal(workers.length,0);
+  await assert.rejects(worker.read(hudCrop(grid())),/TIMEOUT/);assert.equal(workers[0].terminated,1);
+  const pending=worker.read(hudCrop(grid())),rejected=assert.rejects(pending,/CLOSED/);
+  await worker.close();await rejected;assert.equal(workers[1].terminated,1);assert.equal(worker.worker,null);
 });

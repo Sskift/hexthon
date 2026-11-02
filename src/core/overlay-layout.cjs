@@ -35,7 +35,26 @@ function shopBounds(window, shop) {
   ];
   // Only use space beside the detected shop. If none fits, stay hidden rather
   // than cover shop controls or fall back to a permanent screen corner.
+  const sideSpace=Math.max(panel.x-window.x,window.x+window.width-panel.x-panel.width);
+  const compactWidth=clamp(Math.floor(sideSpace-gap-edge),190,230),compactHeight=300;
+  const compactY=clamp(panel.y+(panel.height-compactHeight)/2,window.y+edge,window.y+window.height-compactHeight-edge);
+  const barWidth=Math.min(760,window.width-2*edge),barHeight=96;
+  const barX=clamp(panel.x+(panel.width-barWidth)/2,window.x+edge,window.x+window.width-barWidth-edge);
+  candidates.push({x:panel.x+panel.width+gap,y:compactY,width:compactWidth,height:compactHeight},
+    {x:panel.x-gap-compactWidth,y:compactY,width:compactWidth,height:compactHeight},
+    {x:barX,y:panel.y-gap-barHeight,width:barWidth,height:barHeight},
+    {x:barX,y:panel.y+panel.height+gap,width:barWidth,height:barHeight});
   const chosen=candidates.find(b=>b.x>=window.x+edge&&b.y>=window.y+edge&&b.x+b.width<=window.x+window.width-edge&&b.y+b.height<=window.y+window.height*.89);
   return chosen?Object.fromEntries(Object.entries(chosen).map(([k,v])=>[k,Math.round(v)])):null;
 }
-module.exports = { cardBounds, companionBounds, shopBounds };
+function draftBounds(client,workArea){
+  if(!client||!workArea)return null;
+  const width=300,height=Math.min(580,workArea.height-24),gap=12;
+  if(height<500)return null;
+  const y=clamp(client.y+(client.height-height)/2,workArea.y+12,workArea.y+workArea.height-height-12);
+  for(const x of [client.x+client.width+gap,client.x-width-gap]){
+    if(x>=workArea.x+8&&x+width<=workArea.x+workArea.width-8)return {x:Math.round(x),y:Math.round(y),width,height};
+  }
+  return null;
+}
+module.exports = { cardBounds, companionBounds, shopBounds, draftBounds };

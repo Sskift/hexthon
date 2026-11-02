@@ -1,6 +1,6 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {visualContext, sameVisualContext, isCurrentVisualContext, captureMatchesContext, trackingPresentation} = require('../src/core/visual-context.cjs');
+const {visualContext, sameVisualContext, isCurrentVisualContext, captureMatchesContext, captureIsFresh, trackingPresentation} = require('../src/core/visual-context.cjs');
 const {OfferTracker} = require('../src/core/vision.cjs');
 
 const window = () => ({hwnd:'1234', pid:42, dpi:144, foreground:true, visible:true, minimized:false,
@@ -38,6 +38,16 @@ test('fresh-looking capture with wrong process, geometry or DPI cannot match the
     const f=frame(w);change(f);assert.equal(captureMatchesContext(f,context),false);
   }
   assert.equal(captureMatchesContext(frame(w),visualContext(w,false)),false);
+});
+test('unchanged window geometry cannot make an expired or invalid capture timestamp fresh', () => {
+  const sample={capturedAt:new Date(10000).toISOString()};
+  assert.equal(captureIsFresh(sample,12500),true);
+  assert.equal(captureIsFresh(sample,12501),false);
+  assert.equal(captureIsFresh(sample,14000,4000),true);
+  assert.equal(captureIsFresh(sample,14001,4000),false);
+  assert.equal(captureIsFresh(sample,9749),false);
+  assert.equal(captureIsFresh({capturedAt:'invalid'},10000),false);
+  assert.equal(captureIsFresh(null,10000),false);
 });
 
 test('first absent observation hides cards despite identical tracker output; second absence retains inferred pick semantics', () => {

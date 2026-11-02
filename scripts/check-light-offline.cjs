@@ -31,6 +31,7 @@ function runInElectron() {
   const gate = require('../src/core/scene-gate.cjs');
   const { OcrReader } = require('../src/core/ocr.cjs');
   const { titleOffer } = require('../src/core/light-offer.cjs');
+  const { readOfferTitles } = require('../src/core/title-reader.cjs');
   const root = path.resolve(__dirname, '..');
   const qaDir = path.join(root, '.qa', 'light-offline');
   app.disableHardwareAcceleration();
@@ -60,7 +61,7 @@ function runInElectron() {
     assert.ok(templateImages.every(image => !image.isEmpty()), 'Local button templates must exist.');
     const templates = gate.prepareTemplates(templateImages.map(pixels));
     const templateUrls = templateImages.map(image => image.toDataURL());
-    reader = new OcrReader(path.join(qaDir, 'unused-model-cache'));
+    reader = new OcrReader(path.join(qaDir, 'unused-model-cache'),()=>{},(bitmap,size)=>nativeImage.createFromBitmap(bitmap,size));
 
     async function render(width, height, wrapped, missingMiddle = false, { names = expectedNames, fontWeight = 600 } = {}) {
       const geometry = gate.layout(width, height);
@@ -140,7 +141,11 @@ function runInElectron() {
         if (offer.cards.length === 3) assert.deepEqual(offer.cards.map(card => card.id), boundaryExpected.map(augment => augment.id));
         variants.push({ enlargedBeforeOcr: enlarged, inputSize: strip.getSize(), healingTitleExact: result.matches.some(match => match.name === boundaryNames[0] && match.exact), acceptedCards: offer.cards.length, ...result.timings });
       }
-      boundaryCases.push({ client: { width, height }, firstTitle: boundaryNames[0], font: 'Microsoft YaHei', fontWeight, fontPx: Math.round(height * .025), wrapped, variants });
+      const adaptive=await readOfferTitles({ocr:reader,image:original,region:geometry.titleRegion,geometry,augments:catalog,capturedAt:'synthetic-adaptive'});
+      assert.ok(adaptive.reads<=4);
+      if(adaptive.offer.cards.length)assert.deepEqual(adaptive.offer.cards.map(c=>c.id),boundaryExpected.map(a=>a.id));
+      boundaryCases.push({ client: { width, height }, firstTitle: boundaryNames[0], font: 'Microsoft YaHei', fontWeight, fontPx: Math.round(height * .025), wrapped, variants,
+        adaptive:{reads:adaptive.reads,acceptedCards:adaptive.offer.cards.length,durationMs:adaptive.durationMs} });
     }
 
     const { image, geometry } = await render(1920, 1080, false, true);

@@ -37,10 +37,19 @@ function render() {
   if(g.phase!==lastPhase){if(g.phase==='ChampSelect')setTab('draft');else if(g.phase==='InProgress')setTab('augments');lastPhase=g.phase;}
   $('auto-status').textContent = state.autoStatus || (g.liveConnected ? '已连接游戏，正在自动检查强化卡片与构筑变化。' : g.lcuConnected ? '已连接客户端，等待进入选人或对局。' : '等待英雄联盟窗口，进入选人或对局后自动跟随。');
   document.querySelector('.auto-banner strong').textContent = apiOnly?'本地接口模式 · 无画面采集':state.settings.autoScan===false ? '自动识别已暂停' : '自动识别运行中';
+  document.querySelector('.auto-chip').textContent=apiOnly?'API':'AUTO';
+  $('runtime-mode-label').textContent=apiOnly?'本地接口 · 无画面采集':'自动识别 · 场景提示';
+  $('scene-description').textContent=apiOnly?'当前接口模式不显示游戏浮层。已知海克斯记录按局保存；未取得的数据保持未知。':'选卡时显示卡片附近评分，商店打开时在旁边空位显示出装建议；选人提示放在客户端旁的桌面空位。没有足够空间时隐藏。';
+  $('performance-title').textContent=apiOnly?'不采集游戏画面':'小区域识别，按需处理';
+  $('performance-description').textContent=apiOnly?'后台只请求本机接口，不启动画面采集、OCR 或图标匹配。':'仅在游戏前台读取局部区域；标题不变时复用结果，已选图标在后台线程校验。识别有时间与次数上限，不保存画面或录制视频。';
+  document.querySelector('.legacy-visual-settings').hidden=apiOnly;
+  document.querySelector('.legacy-recognition-settings').hidden=apiOnly;
+  document.querySelector('.region-inputs').hidden=state.recognitionMode==='visual-light';
   $('patch').textContent = `PATCH ${state.augmentMeta?.patch || state.catalog?.patch || '—'}`;
-  $('overlay-toggle').textContent = state.overlayEnabled ? '暂停场景提示' : '开启场景提示';
+  $('overlay-toggle').textContent = state.overlayEnabled ? '暂停识别与提示' : '恢复识别与提示';
   $('overlay-toggle').hidden=apiOnly;
   $('scan').hidden=apiOnly;
+  $('scan').textContent='立即检查当前游戏场景';
   document.querySelector('input[name=autoScan]').disabled=apiOnly;
   document.querySelector('.recognition-tools').hidden=apiOnly;
   const online = g.lcuConnected || g.liveConnected;
@@ -95,7 +104,8 @@ function renderLoadout() {
   const items=state.game.ownItems||[];
   $('owned-items').innerHTML=items.length?items.map(i=>`<span class="loadout-item" title="${escapeHtml(i.name||i.id)}">${image(i)}<span>${escapeHtml(i.name||i.id)}</span></span>`).join(''):`<span class="loadout-empty">${Array.isArray(state.game.ownItems)?'暂无装备':'等待自动读取装备'}</span>`;
   const selected=selectedList();
-  $('selected-status').textContent=state.recognitionMode==='api'?'仅覆盖接口可读的部分强化':selected.some(a=>a.confidence!=='confirmed')?'含自动识别记录':'';
+  $('selected-status').textContent=(state.selectionRecovery?.restored?'已恢复本局记录 · ':'')+(state.selectionHistoryComplete?'记录已确认':'已知记录，可能不完整');
+  $('undo-selection').hidden=!state.selectionRecovery?.canUndo;
   $('selected-augments').innerHTML=selected.length?selected.map(a=>`<span class="selected-pill ${a.confidence!=='confirmed'?'inferred':''}" title="${escapeHtml(a.evidence||'本地构筑记录')}">${escapeHtml(a.name||`#${a.id}`)}<small>${selectionConfidence(a)}</small>${a.confidence!=='confirmed'?`<button data-confirm-chosen="${a.id}" aria-label="确认${escapeHtml(a.name)}">✓</button>`:''}<button data-unchoose="${a.id}" aria-label="移除${escapeHtml(a.name)}">×</button></span>`).join(''):`<span class="loadout-empty">${state.recognitionMode==='api'?'接口未提供完整已选信息':'尚未检测到已选强化'}</span>`;
 }
 function renderDraft() {
@@ -166,6 +176,7 @@ $('follow').addEventListener('click', () => action(() => api.followChampion()));
 $('refresh').addEventListener('click', e => action(async () => { await api.refresh(); toast(state.augmentMeta?.cacheStatus==='stale'?'连接暂不可用，保留已有资料':'资料更新完成'); }, e.currentTarget));
 $('overlay-toggle').addEventListener('click', () => action(() => api.toggleOverlay()));
 $('clear-offers').addEventListener('click', () => action(() => api.setOffers([])));
+$('undo-selection').addEventListener('click', () => action(() => api.undoSelectedCorrection()));
 $('scan').addEventListener('click', () => action(() => api.scan()));
 $('import-image').addEventListener('click', () => action(() => api.importImage()));
 $('confirm-mode').addEventListener('change', e => action(() => api.confirmMode(e.target.checked)));
