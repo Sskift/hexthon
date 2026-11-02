@@ -23,10 +23,14 @@
 | 暂停源码启动 | `healthReady:true` 后正常退出 | 使用官方 Electron，版本 0.4.1；采集、窗口监控和浮层均关闭、无错误，退出后状态为 stopped。 |
 | 原目录 OCR | 246/264 完整三卡，773/792 正确标题，误认 0 | 合成文字与真实 Windows OCR；上版完整三卡 184/264。 |
 | 扩展 OCR | 394/440 完整三卡，1268/1320 正确标题，误认 0 | 独立字重、亮度、阴影和背景组合，仍是合成画面。 |
-| 本地 0.4.1 便携包 | 待本轮最终构建 | 不沿用 0.4.0 的包校验结果。 |
-| 本轮 Windows CI／正式 Release | 待当前代码推送／发布 | 已配置不等于远端通过，已有本地 ZIP 不等于正式 Release 已发布。 |
+| 本地 0.4.1 便携包 | 构建、清单及正式解压器全量验证通过 | 2023 个文件、441546935 字节；未运行发行 EXE。 |
+| Windows CI | [全部通过](https://github.com/Sskift/hexthon/actions/runs/41496457091) | 实现提交 `829b40b`；测试、回放、布局、更新生命周期、打包、归档及产物上传均通过。 |
+| 正式 Release | [v0.4.1 已发布](https://github.com/Sskift/hexthon/releases/tag/v0.4.1) | ZIP 187679080 字节（约 179.0 MiB），附 SHA-256 文件，非草稿、非预发布。 |
+| 正式更新下载链路 | `metadataVerified:true`、`downloadVerified:true` | 实际从公开 Release 下载 ZIP，经生产更新模块核验摘要、解压、冻结清单及全部文件；只写独立 QA 目录，没有安装或启动发行 EXE。 |
 
 API、回放和布局等隐藏检查有相应窗口计数证据；不能据此断言本轮所有独立临时试验进程从未出现过窗口。源码启动报告为 `.qa/production-0.4.1.json`，更新进程报告为 `.qa/update-lifecycle.json`；这些本机产物不进入源码或发行包。
+
+实现与发行标签对应提交 `829b40bfb560947d47f013b44c6702cd33db8213`。本地目录为 `dist/0.4.1/Hexthon-win32-x64`；压缩包为 `dist/Hexthon-0.4.1-win32-x64.zip`，SHA-256 为 `3957f79a082b23f964fec569bf1f9ec66fd26b3465dd15fa93b2800db048cb93`。真实下载验证报告在 `.qa/release-0.4.1.json`，生产解压器全量验证报告在 `.qa/archive-0.4.1.json`；两个报告均确认未安装／未启动发行 EXE。
 
 ## 标题覆盖情况
 

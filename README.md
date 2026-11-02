@@ -6,6 +6,8 @@
 
 ## 启动与使用
 
+[下载 Windows 便携版 0.4.1](https://github.com/Sskift/hexthon/releases/tag/v0.4.1)（约 179 MiB，含 SHA-256 校验文件）。[Windows CI](https://github.com/Sskift/hexthon/actions/runs/41496457091) 已通过；正式发行包已完成真实下载和全文件校验。
+
 从源码运行：先执行 `npm.cmd ci`，再选择下面的启动命令。便携包使用时保留整个文件夹，运行包不需要 Node 或 Python。各版打包、远端 CI 和正式 Release 的验证结果见 [本版验证记录](docs/RELEASE_0.4.1.md)。自定义可执行文件尚未运行验证，校验清单不等于代码签名。
 
 双击 **`Start-Hexthon.vbs`** 后台请求启动助手模式，不弹出命令行或面板；优先使用已经完成健康检查的更新目录，再使用所在目录的便携 EXE／源码 Electron。双击 **`Stop-Hexthon.vbs`** 请求正常退出。启动器不清除暂停状态、不自动提权或更改系统策略，错误写入 `%APPDATA%\Hexthon\launcher-status.json`；`requested` 只表示请求已发出，不代表实际启动成功。带 `%变量%` 语法的路径会拒绝，避免被启动器展开成其他位置。
