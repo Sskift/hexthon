@@ -11,7 +11,7 @@ directory = os.environ.get('HEXTHON_BUILD_DIRECTORY', version)
 if not re.fullmatch(r'\d+\.\d+\.\d+(?:-[a-z0-9]+)?', directory):
     raise ValueError('Invalid build directory name')
 release = workspace / 'dist' / directory / 'Hexthon-win32-x64'
-output = workspace / 'dist' / f'Hexthon-{version}-win32-x64.zip'
+output = workspace / 'dist' / f'Hexthon-{directory}-win32-x64.zip'
 with ZipFile(output, 'x', ZIP_DEFLATED, compresslevel=6) as archive:
     for filename in release.rglob('*'):
         relative = filename.relative_to(release)

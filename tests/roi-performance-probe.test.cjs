@@ -83,8 +83,37 @@ test('a stalled monitor is bounded without ever creating a capture helper', asyn
   assert.equal(result.status, 'timeout'); assert.equal(h.state.captureInstances, 0); assert.equal(h.state.stopped, true);
 });
 
-test('Windows CPU query compiles and reads only the owned test process, without capture helpers', { skip: process.platform !== 'win32' }, async () => {
-  const result = await readOwnedProcessCpu([{ role: 'monitor', child: { pid: process.pid, exitCode: null, signalCode: null, killed: false } }], 2000);
-  assert.equal(result.queried, true); assert.ok(Number.isFinite(result.monitorMs) && result.monitorMs >= 0);
+test('CPU query timeout stays unknown, reports a sanitized reason, and preserves its caller budget', async () => {
+  const records = [{ role: 'monitor', child: { pid: 42, exitCode: null, signalCode: null, killed: false } }];
+  let invoked = false;
+  const result = await readOwnedProcessCpu(records, 31, { execute: (exe, args, settings, callback) => {
+    invoked = true; assert.equal(exe, 'powershell.exe'); assert.equal(settings.timeout, 31); assert.equal(settings.windowsHide, true);
+    assert.ok(args.includes('-NoProfile')); assert.ok(args.includes('-NonInteractive'));
+    callback(Object.assign(new Error('private helper path'), { killed: true, signal: 'SIGTERM' }), '');
+  } });
+  assert.equal(invoked, true); assert.equal(result.reason, 'CPU_QUERY_TIMEOUT');
+  assert.equal(result.monitorMs, null); assert.equal(result.captureMs, null);
+  assert.doesNotMatch(JSON.stringify(result), /private|SIGTERM/);
+});
+
+test('CPU query reports failures, malformed output and exited targets without inventing CPU values', async () => {
+  const child = { pid: 42, exitCode: null, signalCode: null, killed: false }, records = [{ role: 'monitor', child }];
+  for (const [error, stdout, reason] of [[new Error('native detail'), '', 'CPU_QUERY_FAILED'], [null, '{}', 'CPU_QUERY_INVALID_OUTPUT'], [null, '[]', 'CPU_QUERY_TARGET_UNAVAILABLE']]) {
+    const result = await readOwnedProcessCpu(records, 50, { execute: (_exe, _args, _settings, callback) => callback(error, stdout) });
+    assert.equal(result.reason, reason); assert.equal(result.monitorMs, null);
+  }
+  const closed = await readOwnedProcessCpu(records, 50, { execute: (_exe, _args, _settings, callback) => {
+    child.killed = true; callback(null, '[{"role":"monitor","cpuMs":2}]');
+  } });
+  assert.equal(closed.reason, 'CPU_QUERY_TARGET_UNAVAILABLE'); assert.equal(closed.monitorMs, null);
+});
+
+test('Windows CPU query compiles and reads only the owned test process, without capture helpers', { skip: process.platform !== 'win32', timeout: 12000 }, async () => {
+  // Windows CI starts many Node test files concurrently. Its previous failure
+  // took about 2 s but discarded the cause. Keep a real query with a bounded 10 s
+  // integration allowance; production still uses its <=700 ms optional budget.
+  const result = await readOwnedProcessCpu([{ role: 'monitor', child: { pid: process.pid, exitCode: null, signalCode: null, killed: false } }], 10000);
+  assert.equal(result.queried, true); assert.equal(result.reason, null, `CPU query unavailable: ${result.reason}`);
+  assert.ok(Number.isFinite(result.monitorMs) && result.monitorMs >= 0);
   assert.equal(result.captureMs, null);
 });

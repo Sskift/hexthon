@@ -44,24 +44,27 @@ function bounded(promise, timeoutMs, signal) {
   });
 }
 
-async function readOwnedProcessCpu(records, timeoutMs = 700) {
+async function readOwnedProcessCpu(records, timeoutMs = 700, { execute = execFile } = {}) {
   // Query only currently owned ChildProcess handles. No name-based lookup,
   // process enumeration, raw command-line capture, or cross-shell killing.
   const live = records.filter(r => ['monitor', 'capture'].includes(r.role) && Number.isSafeInteger(r.child?.pid) && r.child.pid > 0 && r.child.exitCode === null && r.child.signalCode === null && !r.child.killed);
-  if (!live.length) return { queried: false, monitorMs: null, captureMs: null };
+  if (!live.length) return { queried: false, monitorMs: null, captureMs: null, reason: 'CPU_QUERY_NO_OWNED_PROCESS' };
   const specs = live.map(r => `@{role='${r.role}';processId=${r.child.pid}}`).join(',');
   const code = `$ErrorActionPreference='Stop';$rows=@();foreach($entry in @(${specs})){$taskProcess=Get-Process -Id ([int]$entry.processId) -ErrorAction SilentlyContinue;if($null -ne $taskProcess){$rows+=@{role=[string]$entry.role;cpuMs=[math]::Round($taskProcess.TotalProcessorTime.TotalMilliseconds,3)}}};ConvertTo-Json -InputObject @($rows) -Compress`;
   const encoded = Buffer.from(code, 'utf16le').toString('base64');
   return new Promise(resolve => {
-    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true, timeout: Math.max(1, timeoutMs), maxBuffer: 4096 }, (error, stdout) => {
-      const result = { queried: true, monitorMs: null, captureMs: null };
-      if (!error) try {
+    execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true, timeout: Math.max(1, timeoutMs), maxBuffer: 4096 }, (error, stdout) => {
+      const result = { queried: true, monitorMs: null, captureMs: null, reason: null };
+      if (error) result.reason = error.killed || error.code === 'ETIMEDOUT' ? 'CPU_QUERY_TIMEOUT' : 'CPU_QUERY_FAILED';
+      else try {
         const rows = JSON.parse(stdout.replace(/^\uFEFF/, ''));
-        for (const row of Array.isArray(rows) ? rows : []) {
-          const owned = live.find(r => r.role === row.role && r.child.exitCode === null && r.child.signalCode === null);
+        if (!Array.isArray(rows)) throw new Error('CPU_QUERY_SCHEMA');
+        for (const row of rows) {
+          const owned = live.find(r => r.role === row?.role && r.child.exitCode === null && r.child.signalCode === null && !r.child.killed);
           if (owned && Number.isFinite(row.cpuMs) && row.cpuMs >= 0) result[`${row.role}Ms`] = round(row.cpuMs);
         }
-      } catch { /* Optional CPU telemetry must not expose native errors. */ }
+        if (live.some(r => result[`${r.role}Ms`] === null)) result.reason = 'CPU_QUERY_TARGET_UNAVAILABLE';
+      } catch { result.reason = 'CPU_QUERY_INVALID_OUTPUT'; }
       resolve(result);
     });
   });
@@ -91,7 +94,7 @@ async function runProbe({ Monitor = WindowMonitor, Capture = WindowCapture, read
   const reserve = Math.min(1500, budgetMs / 4), activeMs = Math.min(LIMITS.activeWaitMs, budgetMs - reserve);
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), activeMs);
   const report = { status: 'unavailable', reason: 'NO_FOREGROUND_LEAGUE', limits: LIMITS, samples: [],
-    helperStarts: { monitor: 0, capture: 0, cpuQuery: 0 }, helperLifetimeCpuMs: { monitor: null, capture: null },
+    helperStarts: { monitor: 0, capture: 0, cpuQuery: 0 }, helperLifetimeCpuMs: { monitor: null, capture: null }, helperCpuQueryReason: 'CPU_QUERY_NOT_RUN',
     mechanism: 'Independent foreground-client CopyFromScreen ROI helper; elapsed time and CPU only, not game FPS.' };
   let monitor, capture, firstListener;
   try {
@@ -143,8 +146,9 @@ async function runProbe({ Monitor = WindowMonitor, Capture = WindowCapture, read
         const cpu = await bounded(readCpu([{ role: 'monitor', child: monitorChild }, { role: 'capture', child: captureChild }], Math.min(700, remaining() - 200)), Math.min(800, remaining()));
         report.helperStarts.cpuQuery = cpu?.queried ? 1 : 0;
         report.helperLifetimeCpuMs = { monitor: Number.isFinite(cpu?.monitorMs) ? cpu.monitorMs : null, capture: Number.isFinite(cpu?.captureMs) ? cpu.captureMs : null };
+        report.helperCpuQueryReason = cpu?.reason || null;
       }
-    } catch { /* Cleanup and metadata remain bounded if CPU querying fails. */ }
+    } catch (error) { report.helperCpuQueryReason = error?.message === 'PROBE_BUDGET' ? 'CPU_QUERY_TIMEOUT' : 'CPU_QUERY_FAILED'; }
     const monitorClosed = waitForOwnedClose(monitorChild, Math.min(1000, remaining()));
     try { monitor?.stop(); } catch {}
     try { await bounded(Promise.allSettled([monitorClosed, Promise.resolve(capture?.close())]), Math.min(1000, remaining())); } catch {}
