@@ -50,7 +50,7 @@ async function readOwnedProcessCpu(records, timeoutMs = 700) {
   const live = records.filter(r => ['monitor', 'capture'].includes(r.role) && Number.isSafeInteger(r.child?.pid) && r.child.pid > 0 && r.child.exitCode === null && r.child.signalCode === null && !r.child.killed);
   if (!live.length) return { queried: false, monitorMs: null, captureMs: null };
   const specs = live.map(r => `@{role='${r.role}';processId=${r.child.pid}}`).join(',');
-  const code = `$ErrorActionPreference='Stop';$rows=@();foreach($entry in @(${specs})){$taskProcess=Get-Process -Id ([int]$entry.processId) -ErrorAction SilentlyContinue;if($null -ne $taskProcess){$rows+=@{role=[string]$entry.role;cpuMs=[math]::Round($taskProcess.TotalProcessorTime.TotalMilliseconds,3)}};ConvertTo-Json -InputObject @($rows) -Compress`;
+  const code = `$ErrorActionPreference='Stop';$rows=@();foreach($entry in @(${specs})){$taskProcess=Get-Process -Id ([int]$entry.processId) -ErrorAction SilentlyContinue;if($null -ne $taskProcess){$rows+=@{role=[string]$entry.role;cpuMs=[math]::Round($taskProcess.TotalProcessorTime.TotalMilliseconds,3)}}};ConvertTo-Json -InputObject @($rows) -Compress`;
   const encoded = Buffer.from(code, 'utf16le').toString('base64');
   return new Promise(resolve => {
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true, timeout: Math.max(1, timeoutMs), maxBuffer: 4096 }, (error, stdout) => {
@@ -182,4 +182,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch(() => { console.error('ROI_PROBE_FAILED'); process.exitCode = 1; });
-module.exports = { LIMITS, buildPlan, statistics, runProbe };
+module.exports = { LIMITS, buildPlan, statistics, runProbe, readOwnedProcessCpu };

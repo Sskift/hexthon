@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const fs=require('node:fs/promises');
 const path=require('node:path');
-async function runApiSmoke({panel,state,snapshot,publish,recalculate,windows}){
+async function runApiSmoke({panel,state,snapshot,publish,recalculate,windows,setNativeSync}){
   assert.equal(windows.length,1,'API mode creates only the control panel');
   assert.equal(panel.isVisible(),false);
   assert.equal(state.captureEnabled,false);
@@ -24,11 +24,28 @@ async function runApiSmoke({panel,state,snapshot,publish,recalculate,windows}){
   assert.ok(state.matchup.recommendations.some(r=>/法穿/.test(r.reason)),'Observed magic-resist equipment drives a contextual item suggestion');
   const markup=await run('window.hexthon.getState().then(value=>{state=value;render();return document.getElementById("matchup-list").textContent})');
   assert.match(markup,/法穿/);assert.match(markup,/海克斯记录不完整/);
+  const revision=state.recommendationRevision;
+  state.game.checkedAt=new Date().toISOString();state.game.gameTime=250;recalculate();
+  assert.equal(state.recommendationRevision,revision,'Identical gameplay context reuses recommendations');
+  let imports=0,restores=0;
+  setNativeSync({probe:async()=>({status:'available',readable:true}),importPreview:async({itemSet,isCurrent})=>{
+    imports++;assert.equal(isCurrent(),true);assert.deepEqual(itemSet.associatedChampions,[103]);assert.ok(itemSet.blocks.length);
+    return {status:'written',writeVerified:true,hotReloadVerified:false};
+  },flush:async()=>{throw new Error('simulated earlier disk failure');},restore:async()=>{restores++;return {status:'restored',restored:1};}});
+  await run('window.hexthon.probeNativeItemSets()');await run('window.hexthon.importNativeItemSet()');assert.equal(imports,1);
+  state.game.gameVersion='99.99.1';recalculate();publish();
+  assert.equal(state.compatibility.staticRulesEnabled,false);
+  assert.equal(await run('window.hexthon.importNativeItemSet().then(()=>false,()=>true)'),true);assert.equal(imports,1);
+  state.game.gameVersion=null;recalculate();
+  await run('window.hexthon.restoreNativeItemSets()');assert.equal(restores,1);assert.equal(snapshot().settings.nativeItemSets,false);
+  const exported=await run('window.hexthon.exportDiagnostics()');
+  const diagnostics=JSON.parse(await fs.readFile(exported.filename,'utf8'));
+  assert.equal(diagnostics.coverage.completeSelectedAugments,false);assert.equal('monitor' in diagnostics,false);
   state.selectedChampion=state.catalog.champions.find(c=>c.id===22);recalculate();publish();
   assert.equal(state.matchup,null,'Browsing another hero must not apply the current player inventory');
   assert.ok(state.buildSuggestions.every(g=>g.rows.every(r=>r.items.every(i=>i.owned===null))));
   assert.equal(panel.isVisible(),false);assert.equal(state.captureEnabled,false);
-  const report={passed:true,captureEnabled:false,windowCount:1,imagesCreated:0,checks:['API default','one hidden panel','capture IPC blocked','no overlay','clear capability status','equipment context renders','other champion context isolated']};
+  const report={passed:true,captureEnabled:false,windowCount:1,imagesCreated:0,checks:['API default','one hidden panel','capture IPC blocked','no overlay','clear capability status','equipment context renders','other champion context isolated','unchanged context reuse','manual native itemset IPC with fake transport','patch mismatch blocks native import','restore retries after earlier disk failure','redacted diagnostic export']};
   await fs.mkdir(path.resolve(__dirname,'../.qa'),{recursive:true});
   await fs.writeFile(path.resolve(__dirname,'../.qa/api-smoke.json'),JSON.stringify(report,null,2));
   console.log(JSON.stringify(report));

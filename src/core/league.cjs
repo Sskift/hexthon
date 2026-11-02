@@ -127,6 +127,7 @@ function liveContext(active, players, champions, augments=[]) {
 }
 class LeagueReader {
   constructor(options = {}) { this.connection = null; this.nextDiscovery = 0; this.discover = options.discover || discoverConnection; this.get = options.get || localGet; }
+  itemSetsClient(options = {}) { const { LcuItemSetsClient } = require('./lcu-itemsets.cjs'); return new LcuItemSetsClient({ ...options, getConnection: () => this.connection }); }
   reset() { this.connection = null; this.nextDiscovery = 0; }
   async poll(settings, champions, augments=[]) {
     if (!this.connection && Date.now() >= this.nextDiscovery) {

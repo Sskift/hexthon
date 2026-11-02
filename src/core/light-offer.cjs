@@ -5,9 +5,10 @@ function titleOffer(result,region,geometry,augments,capturedAt) {
   const recognized=[],unknownSlots=[];
   const none=reason=>({cards:[],recognized,unknownSlots:unknownSlots.length?unknownSlots:[0,1,2],confidence:0,reason,observedAt:capturedAt});
   if(!geometry?.titles?.length||geometry.titles.length!==3||!geometry.cards?.length)return none('卡片布局不可用');
-  const words=(result?.lines||[]).flatMap(line=>line.words?.length?line.words:[line]).filter(w=>
+  const words=(result?.lines||[]).flatMap(line=>line.words?.length?line.words.map(word=>({...word,rowY:line.y,rowHeight:line.height})):[line]).filter(w=>
     typeof w.text==='string'&&[w.x,w.y,w.width,w.height].every(Number.isFinite)&&w.width>0&&w.height>0)
-    .map(w=>({...w,x:region.x+w.x*region.width,y:region.y+w.y*region.height,width:w.width*region.width,height:w.height*region.height}));
+    .map(w=>({...w,x:region.x+w.x*region.width,y:region.y+w.y*region.height,width:w.width*region.width,height:w.height*region.height,
+      rowY:region.y+(Number.isFinite(w.rowY)?w.rowY:w.y)*region.height,rowHeight:(Number.isFinite(w.rowHeight)?w.rowHeight:w.height)*region.height}));
   const names=new Map();
   for(const augment of augments||[]) {
     const key=normalize(augment.name);if(!key)continue;
@@ -20,9 +21,9 @@ function titleOffer(result,region,geometry,augments,capturedAt) {
     // Preserve line order; minor character-box vertical differences inside a
     // line must not reorder Chinese words. Wrapped titles are joined exactly.
     const rows=[];
-    for(const word of inside.sort((a,b)=>a.y-b.y||a.x-b.x)) {
-      let row=rows.find(r=>Math.abs(r.y-word.y)<Math.min(r.height,word.height)*.55);
-      if(!row){row={y:word.y,height:word.height,words:[]};rows.push(row);}row.words.push(word);
+    for(const word of inside.sort((a,b)=>a.rowY-b.rowY||a.x-b.x)) {
+      let row=rows.find(r=>Math.abs(r.y-word.rowY)<Math.min(r.height,word.rowHeight)*.55);
+      if(!row){row={y:word.rowY,height:word.rowHeight,words:[]};rows.push(row);}row.words.push(word);
     }
     const key=normalize(rows.sort((a,b)=>a.y-b.y).map(r=>r.words.sort((a,b)=>a.x-b.x).map(w=>w.text).join('')).join(''));
     const augment=names.get(key);if(!augment){unknownSlots.push(i);continue;}

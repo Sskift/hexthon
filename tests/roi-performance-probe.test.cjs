@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { LIMITS, buildPlan, statistics, runProbe } = require('../scripts/probe-roi-performance.cjs');
+const { LIMITS, buildPlan, statistics, runProbe, readOwnedProcessCpu } = require('../scripts/probe-roi-performance.cjs');
 
 function harness({ foreground = true, onCapture = null, noSnapshot = false } = {}) {
   const state = { starts: 0, captures: [], frames: [], stopped: false, closed: false, captureInstances: 0 };
@@ -81,4 +81,10 @@ test('global budget interrupts stalled fake capture and still closes both owned 
 test('a stalled monitor is bounded without ever creating a capture helper', async () => {
   const h = harness({ noSnapshot: true }), result = await runProbe({ ...h.options, totalWaitMs: 40 });
   assert.equal(result.status, 'timeout'); assert.equal(h.state.captureInstances, 0); assert.equal(h.state.stopped, true);
+});
+
+test('Windows CPU query compiles and reads only the owned test process, without capture helpers', { skip: process.platform !== 'win32' }, async () => {
+  const result = await readOwnedProcessCpu([{ role: 'monitor', child: { pid: process.pid, exitCode: null, signalCode: null, killed: false } }], 2000);
+  assert.equal(result.queried, true); assert.ok(Number.isFinite(result.monitorMs) && result.monitorMs >= 0);
+  assert.equal(result.captureMs, null);
 });

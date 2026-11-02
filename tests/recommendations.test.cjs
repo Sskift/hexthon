@@ -133,7 +133,7 @@ test('Poro snacks are separated from equipment for both regional ids and transla
   assert.deepEqual([...itemFeatures([2052, 220013, { id: 999901, name: '魄罗佳肴' }, 3115]).itemIds], [3115]);
 });
 
-test('Poro snacks cannot become a build row or next purchase while non-purchasable upgrades remain', () => {
+test('Poro snacks are removed while non-purchasable upgrades remain visible without becoming a purchase', () => {
   const builds = [
     { name: '出门装', rows: [[{ id: 2052, name: '魄罗佳肴' }, { id: 1052, name: '增幅典籍' }]] },
     { name: '核心装备', rows: [[{ id: 220013, name: '魄罗佳肴' }, { id: 999901, name: '魄罗佳肴' }, { id: 999902, name: '升级装备' }]] },
@@ -142,7 +142,8 @@ test('Poro snacks cannot become a build row or next purchase while non-purchasab
   const staticData = { items: { 999902: { gold: { purchasable: false } } } };
   const result = buildRecommendations({ builds, ownItems: [{ id: 220013 }], staticData });
   assert.deepEqual(result.map(group => group.name), ['出门装', '核心装备']);
-  assert.deepEqual(result.map(group => group.rows[0].next.id), [1052, 999902]);
+  assert.deepEqual(result.map(group => group.rows[0].next?.id??null), [1052, null]);
+  assert.equal(result[1].rows[0].items[0].blocked,true);
   assert.deepEqual(result.flatMap(group => group.rows.flatMap(row => row.items.map(item => item.id))), [1052, 999902]);
   const unknown = buildRecommendations({ builds, ownItems: null, staticData });
   assert.ok(unknown.every(group => !group.itemsKnown && group.rows.every(row => row.next === null)));

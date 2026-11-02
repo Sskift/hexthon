@@ -28,3 +28,21 @@ test('out-of-band text and malformed boxes cannot supply a card title',()=>{
   r.lines[0].y=NaN;assert.equal(titleOffer(r,region,geometry,catalog,'x').cards.length,0);
   assert.equal(titleOffer(r,region,null,catalog,'x').cards.length,0);
 });
+
+test('short-height Chinese characters retain native OCR line order instead of moving to a second row',()=>{
+  const r=result(),names=[...catalog];names[1]={id:2,name:'一起抱抱'};
+  r.lines[1]={...line('一 起 抱 抱',.47,.3),height:.4,words:[
+    {...line('一',.47,.48),width:.025,height:.06},
+    {...line('起',.495,.3),width:.025,height:.4},
+    {...line('抱',.52,.3),width:.025,height:.4},
+    {...line('抱',.545,.3),width:.025,height:.4},
+  ]};
+  assert.deepEqual(titleOffer(r,region,geometry,names,'x').cards.map(c=>c.id),[1,2,3]);
+});
+
+test('punctuation-only and normalization-colliding names remain unknown rather than guessing an id',()=>{
+  const r=result();r.lines[0].text='罪恶快感！';r.lines[1].text='？？？';
+  const names=[{id:10,name:'罪恶快感！'},{id:11,name:'罪恶快感'},{id:12,name:'？？？'},catalog[2]];
+  const out=titleOffer(r,region,geometry,names,'x');
+  assert.equal(out.cards.length,0);assert.deepEqual(out.unknownSlots,[0,1]);
+});

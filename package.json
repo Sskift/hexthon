@@ -1,6 +1,6 @@
 {
   "name": "hexthon",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "国服海克斯大乱斗外置助手 · OP.GG 资料与本地只读对局信息",
   "private": true,
   "main": "src/main.cjs",
@@ -20,7 +20,12 @@
     "test:shop-layout": "electron tests/shop-layout.fixture.cjs",
     "test:lifecycle": "node scripts/run-lifecycle-smoke.cjs",
     "test:native": "node scripts/check-native-helpers.cjs",
-    "probe:roi": "node scripts/probe-roi-performance.cjs"
+    "probe:roi": "node scripts/probe-roi-performance.cjs",
+    "test:catalog": "node scripts/check-title-catalog.cjs",
+    "probe:itemsets": "node scripts/check-native-itemsets-client.cjs",
+    "verify:package": "node scripts/release-manifest.cjs",
+    "probe:fps": "node scripts/probe-fps-performance.cjs",
+    "prepare:fps": "node scripts/prepare-presentmon.cjs"
   },
   "engines": {
     "node": ">=22.12"

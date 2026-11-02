@@ -1,9 +1,9 @@
 const DEFAULTS = Object.freeze({ leaguePath: '', autoFollow: true, autoOverlay: true,
-  autoScan: false, manualChampion: 'ahri', opacity: 0.94, anchor: 'top-right', displayId: null,
+  autoScan: false, nativeItemSets:false, manualChampion: 'ahri', opacity: 0.94, anchor: 'top-right', displayId: null,
   ocrRegion: { x: 0.15, y: 0.25, width: 0.7, height: 0.48 } });
 function validateSettings(input, current = DEFAULTS) {
   const next = { ...DEFAULTS, ...current };
-  for (const key of ['autoFollow', 'autoOverlay', 'autoScan']) if (typeof input[key] === 'boolean') next[key] = input[key];
+  for (const key of ['autoFollow', 'autoOverlay', 'autoScan', 'nativeItemSets']) if (typeof input[key] === 'boolean') next[key] = input[key];
   if (typeof input.leaguePath === 'string' && input.leaguePath.length < 1000) next.leaguePath = input.leaguePath.trim();
   if (typeof input.manualChampion === 'string' && /^[a-z0-9]+$/.test(input.manualChampion)) next.manualChampion = input.manualChampion;
   if (typeof input.opacity === 'number' && Number.isFinite(input.opacity)) next.opacity = Math.max(0.5, Math.min(1, input.opacity));

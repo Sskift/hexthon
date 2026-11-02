@@ -25,6 +25,7 @@ function recognitionView(snapshot) {
 function runtimeWarnings(snapshot,recognition=recognitionView(snapshot)) {
   return [...new Set([snapshot.error,snapshot.connectionError,snapshot.monitorError,recognition.error,
     snapshot.augmentMeta?.warning,snapshot.buildMeta?.warning,
+    ...(snapshot.compatibility?.warnings||[]),
     snapshot.selectionRecovery?.saveFailed?'本局强化记录保存失败，重启后可能无法完整恢复；当前记录仍保留。':'',
   ].filter(Boolean))];
 }
@@ -156,7 +157,7 @@ function renderSettings() {
   const signature = JSON.stringify([state.settings, state.displays]);
   if (signature !== lastSettings && !form.contains(document.activeElement)) {
     for (const key of ['leaguePath','opacity']) form.elements[key].value = state.settings[key];
-    for (const key of ['autoFollow','autoOverlay','autoScan']) form.elements[key].checked = state.settings[key];
+    for (const key of ['autoFollow','autoOverlay','autoScan','nativeItemSets']) form.elements[key].checked = state.settings[key];
     fillCustomSelect('displayId',[{value:'',label:'主显示器'},...state.displays.map(d=>({value:d.id,label:d.label}))],state.settings.displayId);
     fillCustomSelect('anchor',[{value:'top-right',label:'右上角'},{value:'top-left',label:'左上角'},{value:'bottom-right',label:'右下角'},{value:'bottom-left',label:'左下角'}],state.settings.anchor);
     for (const [field,key] of [['ocrX','x'],['ocrY','y'],['ocrW','width'],['ocrH','height']]) form.elements[field].value = Math.round(state.settings.ocrRegion[key]*100);
@@ -168,6 +169,11 @@ function renderSettings() {
   const failed = Object.entries(state.shortcuts).filter(([,ok]) => !ok).map(([k]) => k);
   if (failed.length) $('diagnostics').textContent += `\n快捷键注册失败：${failed.join('、')}，可使用托盘菜单`;
   $('data-status').textContent = `资料补丁：${state.augmentMeta?.patch||state.catalog?.patch||'未知'}\n符文：${state.augmentMeta?'英雄专属':'通用'}　缓存：${state.augmentMeta?.cacheStatus||'cached'}\n取得时间：${time(state.augmentMeta?.fetchedAt||state.catalog?.fetchedAt)}`;
+  const native=state.nativeItemSets||{},labels={disabled:'自动同步未开启',waiting:'等待海克斯选人或对局',available:'客户端装备方案接口可用',written:'装备方案已写入并核对',unchanged:'方案已经是最新内容',restored:'已撤回可恢复的 Hexthon 方案',conflict:'检测到其他修改，已停止覆盖',unverified:'写入结果尚未核实，可尝试撤回',unavailable:'客户端装备方案暂不可用',stale:'英雄或场景已变化，本次同步取消','patch-mismatch':'补丁不匹配，自动同步已暂停',busy:'正在处理装备方案'};
+  $('native-itemsets-status').textContent=labels[native.status]||'等待客户端';
+  $('native-itemsets-import').disabled=native.status==='busy'||state.loading||!state.buildSuggestions?.length||state.compatibility?.itemSetSyncEnabled===false;
+  const budget=state.scanBudget;
+  $('performance-status').textContent=budget?.samples?`最近识别 ${budget.lastMs} ms · 最近样本 P95 ${budget.p95Ms} ms${budget.throttled?' · 已自动降低检查频率':''}。这是助手处理时间，不是游戏帧率。`:'尚无本轮识别耗时；关闭或暂停时不采样。';
 }
 function toggleOffer(id) { const next = state.offeredIds.includes(id) ? state.offeredIds.filter(x => x !== id) : [...state.offeredIds,id]; return api.setOffers(next); }
 document.addEventListener('click', e => {
@@ -206,9 +212,13 @@ $('confirm-mode').addEventListener('change', e => action(() => api.confirmMode(e
 $('settings-form').addEventListener('submit', e => {
   e.preventDefault(); const form = e.currentTarget;
   const values = { leaguePath:form.elements.leaguePath.value, anchor:form.elements.anchor.value, opacity:Number(form.elements.opacity.value), displayId:form.elements.displayId.value?Number(form.elements.displayId.value):null };
-  for(const key of ['autoFollow','autoOverlay','autoScan']) values[key]=form.elements[key].checked;
+  for(const key of ['autoFollow','autoOverlay','autoScan','nativeItemSets']) values[key]=form.elements[key].checked;
   values.ocrRegion={x:Number(form.elements.ocrX.value)/100,y:Number(form.elements.ocrY.value)/100,width:Number(form.elements.ocrW.value)/100,height:Number(form.elements.ocrH.value)/100};
   action(async()=>{await api.saveSettings(values);toast('设置已保存');});
 });
+$('native-itemsets-probe').addEventListener('click',event=>action(()=>api.probeNativeItemSets(),event.currentTarget));
+$('native-itemsets-import').addEventListener('click',event=>action(()=>api.importNativeItemSet(),event.currentTarget));
+$('native-itemsets-restore').addEventListener('click',event=>action(()=>api.restoreNativeItemSets(),event.currentTarget));
+$('export-diagnostics').addEventListener('click',event=>action(async()=>{const result=await api.exportDiagnostics();toast(`诊断已保存：${result.filename}`);},event.currentTarget));
 api.onState(value => { state=value; render(); });
 api.getState().then(value=>{state=value;render();}).catch(e=>toast(e.message));

@@ -13,5 +13,7 @@ contextBridge.exposeInMainWorld('hexthon', {
   windowAction: action => call('window-action', action), setSelectedAugments: ids => call('set-selected-augments', ids),
   confirmSelectedAugment: id => call('confirm-selected-augment', id),
   undoSelectedCorrection: () => call('undo-selected-correction'),
+  probeNativeItemSets:()=>call('native-itemsets-probe'),importNativeItemSet:()=>call('native-itemsets-import'),restoreNativeItemSets:()=>call('native-itemsets-restore'),
+  exportDiagnostics:()=>call('export-diagnostics'),
   onState: callback => { const listener = (_event, value) => callback(value); ipcRenderer.on('state', listener); return () => ipcRenderer.removeListener('state', listener); },
 });

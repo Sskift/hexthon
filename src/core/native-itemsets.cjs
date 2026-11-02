@@ -93,4 +93,35 @@ function mergeItemSet(existingWrapper, itemSet) {
   return { ...existingWrapper, itemSets };
 }
 
-module.exports = { buildItemSet, mergeItemSet };
+function isOwnedItemSet(page, championId) {
+  const id = positiveId(championId);
+  return Boolean(id && page && typeof page === 'object' && !Array.isArray(page) &&
+    page.uid === itemSetUid(id) && Array.isArray(page.associatedChampions) &&
+    page.associatedChampions.length === 1 && positiveId(page.associatedChampions[0]) === id &&
+    Array.isArray(page.blocks) && page.blocks.length > 0 && page.blocks.length <= 32);
+}
+
+function isImportableItemSet(page, championId) {
+  if (!isOwnedItemSet(page, championId) || page.type !== 'custom' || page.map !== 'any' || page.mode !== 'any' ||
+    typeof page.title !== 'string' || !page.title.startsWith('Hexthon · ') || page.title.length > 200 ||
+    !Array.isArray(page.associatedMaps) || page.associatedMaps.length > 8 || page.associatedMaps.some(id => !positiveId(id)) || page.blocks.length > 8) return false;
+  return page.blocks.every(block => block && typeof block === 'object' && !Array.isArray(block) &&
+    typeof block.type === 'string' && block.type.length > 0 && block.type.length <= 200 &&
+    Array.isArray(block.items) && block.items.length > 0 && block.items.length <= 50 && block.items.every(item =>
+      item && typeof item.id === 'string' && positiveId(item.id) && !isPoroSnack(item, Number(item.id)) &&
+      Number.isSafeInteger(item.count) && item.count >= 1 && item.count <= 99));
+}
+
+// Unlike the legacy preparation helper, transactions reject duplicate target UIDs.
+// A removal/replacement changes only this exact champion's deterministic UID.
+function replaceOwnedItemSet(wrapper, championId, page) {
+  const id = positiveId(championId);
+  if (!id || !wrapper || !Array.isArray(wrapper.itemSets) || (page !== null && !isOwnedItemSet(page, id))) throw new TypeError('ITEMSETS_INVALID');
+  const uid = itemSetUid(id), matches = wrapper.itemSets.filter(value => value?.uid === uid);
+  if (matches.length > 1) throw new TypeError('ITEMSETS_DUPLICATE');
+  const itemSets = wrapper.itemSets.flatMap(value => value?.uid === uid ? (page ? [page] : []) : [value]);
+  if (!matches.length && page) itemSets.push(page);
+  return { ...wrapper, itemSets };
+}
+
+module.exports = { buildItemSet, mergeItemSet, itemSetUid, isOwnedItemSet, isImportableItemSet, replaceOwnedItemSet };

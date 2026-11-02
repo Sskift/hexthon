@@ -11,6 +11,9 @@ const {prepareTemplates,matchAugmentIcons,AugmentIconTracker}=require('./core/au
 const { scoreAugments, rankDraft, buildRecommendations, matchupRecommendations, rerollAdvice } = require('./core/recommendations.cjs');
 const { DEFAULTS } = require('./core/settings.cjs');
 const {startupSettings,updateSettings}=require('./core/runtime-settings.cjs');
+const {compatibility,ScanBudget,diagnosticReport}=require('./core/runtime-diagnostics.cjs');
+const {buildItemSet}=require('./core/native-itemsets.cjs');
+const {NativeItemSetSync}=require('./core/native-itemsets-sync.cjs');
 const { cardBounds, shopBounds, draftBounds } = require('./core/overlay-layout.cjs');
 const {WindowCapture}=require('./core/window-capture.cjs');
 const sceneGate=require('./core/scene-gate.cjs');
@@ -34,6 +37,8 @@ if (smoke) app.setPath('userData', path.resolve(__dirname, lifecycleSmoke?'../.q
 let panel, overlay, draftWindow, tray, provider, reader, ocr, monitor, staticData = {}, quitting = false;
 let settingsQueue=Promise.resolve(),statusQueue=Promise.resolve(),shutdownPromise=null,shutdownComplete=false;
 let panelShowRequests=0;
+let nativeSync,nativeEpoch=0,recommendationCache=null;
+const scanBudget=new ScanBudget();
 let gameTimer, scanTimer, viewTimer, statusTimer, manualOverlay = null, loadSerial = 0, captureBusy = false, gameEpoch = 0;
 let lastOffer = null, tracker = new OfferTracker(), inferredMode = false, captureAt = 0, trackingSignature = '';
 const shopTracker=new ShopTracker({observationTtlMs:5000});
@@ -53,7 +58,7 @@ const state = { version:require('../package.json').version, recognitionMode:ligh
   offeredIds:[], selectedAugments:[], augmentScores:[], reroll:null, draft:null, buildSuggestions:[], matchup:null,
   offer:{cards:[],stable:false,present:false}, shop:{visible:false}, visualSelection:{matches:[],pending:[]}, overlayMode:null, selectionHistoryComplete:false, monitor:{game:null,client:null}, autoStatus:visualMode?'正在寻找英雄联盟窗口…':'正在连接本地客户端接口…',
   ocr:{status:'idle',matches:[],text:''}, overlayVisible:false, loading:false, error:'', shortcuts:{},
-  modeConfirmed:false, displays:[], imageAssets:{} };
+  modeConfirmed:false, displays:[], imageAssets:{},nativeItemSets:{status:'disabled'},compatibility:null,scanBudget:null };
 const settingsFile = () => path.join(app.getPath('userData'),'settings.json');
 const snapshot = () => ({...state,captureEnabled:visualMode&&settings.autoScan&&!quitting,settings});
 function publish() {
@@ -78,26 +83,51 @@ function requestHudRecovery(){hudReadsRemaining=2;hudNextAt=0;}
 function metadata(d) { return d && {patch:d.patch,fetchedAt:d.fetchedAt,cacheStatus:d.cacheStatus||'cached',warning:d.warning||'',url:d.url}; }
 function recalculate() {
   const liveHeroMatches=state.game.liveConnected&&state.game.championId===state.selectedChampion?.id;
+  state.compatibility=compatibility({gameVersion:state.game.gameVersion,catalogPatch:state.catalog?.patch,augmentPatch:state.augmentMeta?.patch,buildPatch:state.buildMeta?.patch,staticVersion:staticData.version});
+  const usableStatic=state.compatibility.staticRulesEnabled?staticData:{champions:{},items:{}};
   const ownItems=liveHeroMatches?state.game.ownItems:null;
   const selected = liveHeroMatches?state.selectedAugments.map(s=>({...state.catalog?.augments.find(a=>a.id===s.id),...s})):[];
   const selectedKnown=liveHeroMatches&&state.selectionHistoryComplete&&state.selectedAugments.every(a=>a.confidence==='confirmed');
+  const key=JSON.stringify({hero:state.selectedChampion?.id,liveHeroMatches,ownItems,selected:selected.map(({id,confidence,source,slot})=>({id,confidence,source,slot})),selectedKnown,stats:state.game.ownChampStats,
+    team:state.game.team,opponents:state.game.opponents,available:state.game.availableChampionIds,self:state.game.championId,rerolls:state.game.augmentRerollsRemaining,offered:state.offeredIds,staticRules:state.compatibility.staticRulesEnabled});
+  if(recommendationCache?.key===key&&recommendationCache.augments===state.augments&&recommendationCache.builds===state.builds&&recommendationCache.catalog===state.catalog){queueNativeSync();return;}
+  recommendationCache={key,augments:state.augments,builds:state.builds,catalog:state.catalog};
+  state.recommendationRevision=(state.recommendationRevision||0)+1;
   state.augmentScores=scoreAugments({augments:state.augments,champion:state.selectedChampion,
     ownItems, selectedAugments:selected, championStats:liveHeroMatches?state.game.ownChampStats:null,
-    staticData, contextKnown:liveHeroMatches, selectedKnown});
+    staticData:usableStatic, contextKnown:liveHeroMatches, selectedKnown});
   state.draft=rankDraft({catalog:state.catalog,team:state.game.team||[],availableChampionIds:state.game.availableChampionIds||[],
-    selfId:state.game.championId,staticData});
-  state.buildSuggestions=buildRecommendations({builds:state.builds,ownItems,staticData,selectedAugments:selected});
+    selfId:state.game.championId,staticData:usableStatic});
+  state.buildSuggestions=buildRecommendations({builds:state.builds,ownItems,staticData:usableStatic,selectedAugments:selected});
   state.matchup=liveHeroMatches?matchupRecommendations({champion:state.selectedChampion,ownItems,
-    team:state.game.team,opponents:state.game.opponents,selectedAugments:selected,staticData,builds:state.builds}):null;
+    team:state.game.team,opponents:state.game.opponents,selectedAugments:selected,staticData:usableStatic,builds:state.builds}):null;
   state.reroll=rerollAdvice({offeredIds:state.offeredIds,scores:state.augmentScores,augments:state.augments,
     rerollsRemaining:state.game.augmentRerollsRemaining??null,selectedKnown});
   if (state.reroll && !state.reroll.label) state.reroll.label=({keep:'保留当前选项', 'consider-reroll':'可以考虑刷新', unknown:'信息不足，暂不判断'})[state.reroll.action];
+  queueNativeSync();
+}
+function currentItemSet(){
+  const c=state.selectedChampion;if(!c||state.loading)return null;
+  const choices=(state.matchup?.recommendations||[]).map(row=>row.item).filter(Boolean);
+  const groups=[...(choices.length?[{name:'本局优先查看 · 规则建议',rows:[{items:choices}]}]:[]),...state.buildSuggestions.map(group=>({...group,rows:group.rows.map(row=>({...row,items:row.items.filter(item=>!item.blocked)}))}))];
+  return buildItemSet({championId:c.id,championName:c.name,championKey:c.key,buildSuggestions:groups});
+}
+function queueNativeSync(){
+  if(!nativeSync||smoke||quitting||!settings.nativeItemSets||state.loading||state.game.championId!==state.selectedChampion?.id)return;
+  if(!state.compatibility?.itemSetSyncEnabled){state.nativeItemSets={status:'patch-mismatch'};return;}
+  const itemSet=currentItemSet();if(!itemSet)return;
+  const epoch=nativeEpoch,hero=state.game.championId,gameId=state.game.gameId,revision=state.recommendationRevision,serial=loadSerial;
+  nativeSync.sync({enabled:true,game:state.game,itemSet,isCurrent:()=>!quitting&&!state.loading&&state.compatibility?.itemSetSyncEnabled&&serial===loadSerial&&settings.nativeItemSets&&state.game.isMayhem&&['ChampSelect','InProgress'].includes(state.game.phase)&&epoch===nativeEpoch&&hero===state.game.championId&&hero===state.selectedChampion?.id&&gameId===state.game.gameId&&revision===state.recommendationRevision}).then(result=>{
+    if(quitting||epoch!==nativeEpoch||['busy','throttled','inactive'].includes(result.status))return;
+    state.nativeItemSets=result;publish();
+  }).catch(()=>{if(!quitting)state.nativeItemSets={status:'unavailable'};});
 }
 async function saveSettings(patch) {
   if(quitting)throw new Error('程序正在退出，停止接收设置变更');
-  const oldPath=settings.leaguePath,oldScan=settings.autoScan;
+  const oldPath=settings.leaguePath,oldScan=settings.autoScan,oldNative=settings.nativeItemSets;
   settings=updateSettings(patch,settings,{visual:visualMode,light:lightVisualMode});
   if(lightVisualMode&&oldScan!==settings.autoScan)recognitionChanged();
+  if(oldNative!==settings.nativeItemSets||oldPath!==settings.leaguePath){nativeEpoch++;state.nativeItemSets={status:settings.nativeItemSets?'waiting':'disabled'};}
   const encoded=JSON.stringify(settings,null,2);
   const write=async()=>{
     await fs.mkdir(app.getPath('userData'),{recursive:true});
@@ -106,7 +136,7 @@ async function saveSettings(patch) {
   };
   const saved=settingsQueue.then(write,write);settingsQueue=saved;
   if(oldPath!==settings.leaguePath) reader.reset();
-  layout(); publish();
+  layout();publish();queueNativeSync();
   await saved;
 }
 function showPanel() { if(quitting)return;panelShowRequests++;if(!smoke){panel.webContents.send('state',snapshot());panel.showInactive();} }
@@ -308,7 +338,7 @@ async function scanGame(){
   if(!activeMayhem() && (state.game.queueId || !/^(?:ARAM|KIWI)$/i.test(state.game.gameMode||'')))throw new Error('当前不是已确认的海克斯模式');
   const context=visualContext(w,lightVisualMode);
   if(!context)throw new Error('游戏窗口尺寸与缩放尚未确认');
-  captureBusy=true;captureAt=Date.now();const epoch=gameEpoch;
+  captureBusy=true;captureAt=Date.now();const epoch=gameEpoch,workStarted=performance.now();let scanFailed=false;
   const current=()=>epoch===gameEpoch&&!quitting&&isCurrentVisualContext(context,state.monitor.game);
   try{
     if(lightVisualMode){await scanLightGame(w,context,current);return;}
@@ -340,8 +370,8 @@ async function scanGame(){
     state.offer.present=lastOffer.cards?.length===3;
     consumeTracking(tracker.observe(lastOffer,pointer(state.monitor)));
     layout();publish();
-  }catch(error){if(!current())return;lightCache=null;state.shop=shopTracker.invalidate();state.offer.present=false;lastOffer=null;consumeTracking(tracker.invalidate());state.ocr={...state.ocr,status:'error',message:error.message};state.autoStatus=error.message;publish();}
-  finally{captureBusy=false;}
+  }catch(error){scanFailed=true;if(!current())return;lightCache=null;state.shop=shopTracker.invalidate();state.offer.present=false;lastOffer=null;consumeTracking(tracker.invalidate());state.ocr={...state.ocr,status:'error',message:error.message};state.autoStatus=error.message;publish();}
+  finally{captureBusy=false;scanBudget.record(performance.now()-workStarted,{failed:scanFailed});state.scanBudget=scanBudget.snapshot();}
 }
 async function scanLightGame(w,context,current){
   const started=performance.now(),client=context.rect;
@@ -430,7 +460,8 @@ async function scanLightSupport(w,context,current,stats){
 }
 async function scanLoop(){
   if(settings.autoScan&&state.monitor.game?.foreground&&state.game.liveConnected&&!captureBusy)await scanGame().catch(()=>{});
-  if(!quitting&&!smoke)scanTimer=setTimeout(scanLoop,lightVisualMode?(Date.now()<shopHintUntil?400:900):1300);
+  const candidateScene=state.offer.present?'cards':state.shop.visible||lightShop.lock?'shop':'idle';
+  if(!quitting&&!smoke)scanTimer=setTimeout(scanLoop,lightVisualMode?scanBudget.delay({scene:candidateScene,hint:Date.now()<shopHintUntil}):1300);
 }
 async function writeStatus(){
   const payload={version:state.version,pid:process.pid,updatedAt:new Date().toISOString(),lifecycle:quitting?'stopped':'running',phase:state.game.phase,
@@ -439,6 +470,7 @@ async function writeStatus(){
     window:state.monitor.game||state.monitor.client||null,offeredIds:state.offeredIds,selectedAugments:state.selectedAugments,
     overlayVisible:state.overlayVisible,overlayMode:state.overlayMode,shop:state.shop,visualSelection:state.visualSelection,shopOverlay:overlay?{visible:overlay.isVisible(),bounds:overlay.getBounds()}:null,cardOverlays:cardWindows.map(w=>({visible:w.isVisible(),bounds:w.getBounds()})),
     error:state.error,connectionError:state.connectionError||'',monitorError:state.monitorError||'',ocr:{status:state.ocr.status,message:state.ocr.message,lastCapture:captureAt},capturePerformance:state.capturePerformance||null,selectionRecovery:state.selectionRecovery||null,
+    nativeItemSets:state.nativeItemSets,compatibility:state.compatibility,scanBudget:state.scanBudget,recommendationRevision:state.recommendationRevision,
     itemIds:state.game.ownItems?.map(i=>i.id),availableChampionIds:state.game.availableChampionIds,
     matchup:state.matchup?{completeAugments:state.matchup.completeAugments,evidence:state.matchup.evidence,recommendations:state.matchup.recommendations}:null};
   const filename=path.join(app.getPath('userData'),'runtime-status.json'),encoded=JSON.stringify(payload,null,2);
@@ -455,6 +487,22 @@ function registerIpc(){
     try{return {ok:true,data:await fn(arg)};}catch(error){return {ok:false,error:error.message};}
   });
   handle('get-state',snapshot,true);
+  handle('native-itemsets-probe',async()=>{state.nativeItemSets=await nativeSync.probe();publish();return state.nativeItemSets;});
+  handle('native-itemsets-import',async()=>{
+    const itemSet=currentItemSet();if(!itemSet)throw new Error('当前英雄出装资料尚未就绪');
+    if(!state.compatibility?.itemSetSyncEnabled)throw new Error('资料与游戏补丁不一致，请先更新资料');
+    const epoch=++nativeEpoch,hero=state.selectedChampion.id,serial=loadSerial,revision=state.recommendationRevision;
+    state.nativeItemSets={status:'busy'};publish();
+    state.nativeItemSets=await nativeSync.importPreview({itemSet,isCurrent:()=>!quitting&&!state.loading&&state.compatibility?.itemSetSyncEnabled&&epoch===nativeEpoch&&serial===loadSerial&&revision===state.recommendationRevision&&hero===state.selectedChampion?.id});publish();return state.nativeItemSets;
+  });
+  handle('native-itemsets-restore',async()=>{
+    await saveSettings({nativeItemSets:false});nativeEpoch++;await nativeSync.flush().catch(()=>{});
+    state.nativeItemSets=await nativeSync.restore({isCurrent:()=>!quitting});publish();return state.nativeItemSets;
+  });
+  handle('export-diagnostics',async()=>{
+    const directory=path.join(app.getPath('userData'),'diagnostics');await fs.mkdir(directory,{recursive:true});
+    const filename=path.join(directory,`hexthon-${Date.now()}.json`);await fs.writeFile(filename,JSON.stringify(diagnosticReport(snapshot()),null,2));return {filename};
+  });
   handle('save-settings',async patch=>{await saveSettings(patch||{});return snapshot();});
   handle('window-action',action=>{if(action==='hide')panel.hide();else if(action==='minimize')panel.minimize();else if(action==='quit'){quitting=true;app.quit();}else throw new Error('无效的窗口操作');});
   handle('select-champion',async key=>{if(!state.catalog.champions.some(c=>c.key===key))throw new Error('未知英雄');await saveSettings({manualChampion:key,autoFollow:false});await loadChampion(key);return snapshot();});
@@ -480,6 +528,8 @@ async function start(){
   provider=new OpggProvider(path.join(app.getPath('userData'),'cache'),path.resolve(__dirname,'../data/seed'));
   if(lifecycleSmoke)provider.get=async(kind,key)=>{const value=await provider.read(kind==='index'?'index':`${key}-${kind}`);if(!value)throw new Error('Missing offline fixture');return value;};
   reader=new LeagueReader();
+  nativeSync=new NativeItemSetSync({client:reader.itemSetsClient(),journalPath:path.join(app.getPath('userData'),'native-itemsets.json')});
+  state.nativeItemSets={status:settings.nativeItemSets?'waiting':'disabled'};
   if(visualMode)ocr=new OcrReader(path.join(app.getPath('userData'),'ocr'),()=>{},(bitmap,size)=>nativeImage.createFromBitmap(bitmap,size),lightVisualMode?{nativeWorker:new WindowsOcrWorker({timeoutMs:2500,retryMs:15000})}:{});
   state.catalog=await provider.read('index');
   if(quitting)return;
@@ -532,7 +582,7 @@ async function start(){
         await augmentWorker?.close();await ocr?.close();await historyStore.queue;quitting=true;app.exit(0);
       }catch(error){console.error(error.stack);await augmentWorker?.close();await ocr?.close();quitting=true;app.exit(1);}return;
     }
-    if(apiSmoke){try{await require('../scripts/api-smoke.cjs').runApiSmoke({panel,state,snapshot,publish,recalculate,windows:BrowserWindow.getAllWindows()});quitting=true;app.exit(0);}catch(error){console.error(error.stack);app.exit(1);}return;}
+    if(apiSmoke){try{await require('../scripts/api-smoke.cjs').runApiSmoke({panel,state,snapshot,publish,recalculate,windows:BrowserWindow.getAllWindows(),setNativeSync:fake=>{nativeSync=fake;}});quitting=true;app.exit(0);}catch(error){console.error(error.stack);app.exit(1);}return;}
     try{await require('../scripts/smoke.cjs').runSmoke({panel,overlay,cardWindows,state,snapshot,publish,ocr,recalculate,layout});quitting=true;app.exit(0);}
     catch(error){console.error(error.stack);quitting=true;app.exit(1);}return;
   }
@@ -573,7 +623,7 @@ app.on('before-quit',event=>{
   };
   shutdownPromise=(async()=>{
     let timer;const deadline=Date.now()+4000;
-    const cleanup=Promise.allSettled([flush(),settingsQueue,windowCapture?.close(),augmentWorker?.close(),ocr?.close()]);
+    const cleanup=Promise.allSettled([flush(),settingsQueue,nativeSync?.flush(),windowCapture?.close(),augmentWorker?.close(),ocr?.close()]);
     const results=await Promise.race([cleanup,new Promise(resolve=>{timer=setTimeout(()=>resolve(null),3500);})]);clearTimeout(timer);
     if(!results||results.some(row=>row.status==='rejected'))state.error='退出保存或资源回收未完成，请检查诊断';
     await Promise.race([writeStatus().catch(()=>{}),new Promise(resolve=>{timer=setTimeout(resolve,Math.max(1,deadline-Date.now()));})]);clearTimeout(timer);

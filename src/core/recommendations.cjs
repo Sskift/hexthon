@@ -1,5 +1,6 @@
 const bundledStatic = require('../../data/static/riot.json');
 const { isPoroSnack } = require('./league.cjs');
+const {CONVERSIONS,ULTIMATE_DEPENDENCIES}=require('./recommendation-rules.cjs');
 const TIER_SCORE = [84, 76, 67, 58, 49, 40];
 const INDEX_LABEL = '规则匹配指数（非胜率）';
 const clamp = n => Math.max(0, Math.min(100, Math.round(n)));
@@ -24,7 +25,7 @@ function itemFeatures(ownItems, staticData = bundledStatic) {
 }
 function augmentFeatures(augment) {
   const text = `${augment?.name || ''} ${augment?.description || ''}`;
-  return { ap: /法术强度/.test(text), attack: /攻击力|攻击速度/.test(text), crit: /暴击/.test(text), onHit: /攻击特效/.test(text),
+  return { ap: /法术强度/.test(text), ad:/攻击力/.test(text),attackSpeed:/攻击速度/.test(text),attack: /攻击力|攻击速度/.test(text), crit: /暴击/.test(text), onHit: /攻击特效/.test(text),
     haste: /技能急速|技能.*冷却/.test(text), health: /最大生命值/.test(text), mana: /法力/.test(text), healing: /治疗|护盾/.test(text) };
 }
 
@@ -69,13 +70,29 @@ function ownsItemOrUpgrade(id, owned, metadata) {
   while(pending.length&&visited.size<100){
     const next=Number(pending.shift());if(visited.has(next))continue;visited.add(next);
     if([...owned].some(held=>sameItem(next,held,metadata)))return true;
-    pending.push(...list(metadata[next]?.into));
+    const equivalents=ITEM_VARIANTS.find(ids=>ids.includes(next))||[next];
+    for(const equivalent of equivalents)if(sameItem(next,equivalent,metadata))pending.push(...list(metadata[equivalent]?.into));
   }
   return false;
 }
 function verifiedAugment(augment,id,key,words) {
-  return augment?.id===id && augment.key===key && typeof augment.description==='string' && words.every(word=>augment.description.includes(word));
+  return augment?.id===id && augment.key===key && typeof augment.description==='string' && words.every(word=>augment.description.replace(/\s/g,'').includes(word.replace(/\s/g,'')));
 }
+function equipmentContext(ownItems,selectedAugments,staticData=bundledStatic){
+  const raw=itemFeatures(ownItems,staticData),effective={...raw},conversions=[];
+  for(const rule of CONVERSIONS){
+    const augment=list(selectedAugments).find(a=>verifiedAugment(a,rule.id,rule.key,rule.words));if(!augment)continue;
+    const tentative=!['api','confirmed'].includes(augment.confidence);
+    conversions.push({augmentId:augment.id,augmentName:augment.name,from:rule.from,to:rule.to,partial:rule.partial===true,
+      observedSource:raw.known?raw[rule.from]:null,tentative,
+      reason:`${tentative?'若已选记录正确，':''}「${augment.name}」会将${rule.fromLabel}${rule.partial?'的一部分':''}转为${rule.toLabel}；不再按原始${rule.fromLabel}推断收益，转化后数值未读取`});
+    // A partial conversion also makes the original threshold unreliable. Do
+    // not fabricate its remaining amount or the order of multiple conversions.
+    effective[rule.from]=0;
+  }
+  return {raw,effective,conversions,amountsKnown:false};
+}
+const requiresUltimate=a=>ULTIMATE_DEPENDENCIES.some(rule=>verifiedAugment(a,rule.id,rule.key,rule.words));
 function augmentDependency(augment,ownItems,staticData=bundledStatic) {
   const rule=DEPENDENCY_RULES.find(r=>verifiedAugment(augment,r.id,r.key,r.words));
   const metadata=staticData.items||{};
@@ -118,16 +135,18 @@ function scoreAugments({ augments = [], champion = null, ownItems = null, select
   const cid = champion?.id ?? champion?.championId;
   const championMeta = staticData.champions?.[cid] || {};
   const tags = championTags || champion?.tags || championMeta.tags || [];
-  const features = itemFeatures(ownItems, staticData);
   const stats = championStats || {};
   const resolvedSelected = list(selectedAugments).map(a => typeof a === 'number' ? augments.find(x => x.id === a) : a);
   const selected = [...new Map(resolvedSelected.filter(Boolean).map(a => [a.id, a])).values()];
+  const equipment=equipmentContext(ownItems,selected,staticData),features=equipment.effective;
   const selectedKnown = Array.isArray(selectedAugments) && resolvedSelected.every(Boolean) && (typeof selectedKnownOverride === 'boolean' ? selectedKnownOverride : true);
   return augments.map(a => {
     const dependency=augmentDependency(a,ownItems,staticData),constraints=[];
     const base = Number.isInteger(a.tier) && TIER_SCORE[a.tier] != null ? TIER_SCORE[a.tier] : null;
     if (base === null) return { id: a.id, score: null, label: INDEX_LABEL, components: { tier: null, equipment: 0, augments: 0, champion: 0 }, reasons: ['来源没有可核实的档位'], dependency, constraints, confidence: 'unknown', sourceScope: a.scope || 'unknown', selectedKnown, itemsKnown: features.known };
     const af = augmentFeatures(a), components = { tier: base, equipment: 0, augments: 0, champion: 0 };
+    const conversion=CONVERSIONS.find(rule=>verifiedAugment(a,rule.id,rule.key,rule.words));
+    if(conversion){af[conversion.from]=false;af.attack=af.ad||af.attackSpeed;}
     const reasons = [`OP.GG ${a.scope === 'champion' ? '英雄专属' : '通用'} T${a.tier}`];
     const add = (group, n, reason) => { components[group] += n; reasons.push(reason); };
     if (features.known) {
@@ -139,12 +158,14 @@ function scoreAugments({ augments = [], champion = null, ownItems = null, select
         const reason='已有装备效果依赖终极技能；选择后这些触发条件无法满足';constraints.push(reason);add('equipment',-12,reason);
       }
       if (af.ap && features.ap >= 80) add('equipment', 5, '现有装备偏法强，可延续法术构筑');
-      if (af.attack && (features.ad >= 70 || features.attackSpeed >= .4)) add('equipment', 5, '现有装备偏普攻输出');
+      if ((af.ad && features.ad >= 70) || (af.attackSpeed && features.attackSpeed >= .4)) add('equipment', 5, '现有装备的攻击力或攻速与此强化对应');
       if (af.crit && features.crit >= .2) add('equipment', 6, '现有暴击装备与暴击效果联动');
       if (af.onHit && features.onHit) add('equipment', 7, '现有攻击特效装备可参与联动');
       if (af.health && features.health >= 500) add('equipment', 4, '现有生命值装备与生命成长契合');
       if (af.mana && features.mana >= 400) add('equipment', 4, '现有法力装备可支撑法力机制');
       if (af.healing && features.healing) add('equipment', 4, '现有治疗护盾装备形成辅助构筑');
+      if(conversion&&equipment.raw[conversion.from]>0)add('equipment',4,`已有${conversion.fromLabel}可供「${a.name}」转为${conversion.toLabel}；具体转化收益未计算`);
+      for(const changed of equipment.conversions)if(af[changed.from])reasons.push(changed.reason);
       if (verifiedAugment(a,1030,'ARAM_Eureka',['法术强度的技能急速']) && (features.ap >= 100 || (finite(stats.abilityPower) && stats.abilityPower >= 150))) add('equipment', 5, '尤里卡可将已有法强转为技能急速');
       if (verifiedAugment(a,1048,'ARAM_JeweledGauntlet',['技能可以造成暴击']) && features.ap >= 80 && features.crit >= .2) add('equipment', 4, '法强与暴击装备同时存在，支持技能暴击');
       if (verifiedAugment(a,1205,'ARAM_ADAPt',['额外攻击力转化为法术强度']) && features.ad >= 100 && tags.includes('Marksman')) add('equipment', -9, '已投入较多攻击装备，转法强会改变当前普攻构筑');
@@ -158,7 +179,7 @@ function scoreAugments({ augments = [], champion = null, ownItems = null, select
     if (af.mana && championMeta.resource && !/法力|Mana/.test(championMeta.resource) && !/NoManaNoProblem/.test(a.key || '')) add('champion', -9, '该英雄不使用法力；法力机制可能不适用');
     for (const chosen of selected) {
       if (chosen.id === a.id) continue;
-      if((disablesUltimate(chosen)&&/终极技能/.test(a.description||'')) || (disablesUltimate(a)&&/终极技能/.test(chosen.description||''))){
+      if((disablesUltimate(chosen)&&requiresUltimate(a)) || (disablesUltimate(a)&&requiresUltimate(chosen))){
         const reason=`「回归基本功」禁用终极技能，与${disablesUltimate(chosen)?'此强化':`已选「${chosen.name}」`}的终极技能条件冲突`;
         constraints.push(reason);add('augments',-12,reason);continue;
       }
@@ -167,7 +188,7 @@ function scoreAugments({ augments = [], champion = null, ownItems = null, select
       else if (verifiedAugment(a,1029,'ARAM_EtherealWeapon',['技能可施加攻击特效']) && cf.onHit) add('augments', 6, `让已选「${chosen.name}」的攻击特效参与技能触发`);
       else if ((verifiedAugment(chosen,1048,'ARAM_JeweledGauntlet',['技能可以造成暴击'])||verifiedAugment(chosen,3123,'JeweledBracelet',['技能可以暴击'])) && af.crit) add('augments', 5, `与已选「${chosen.name}」的技能暴击方向契合`);
       else if (verifiedAugment(chosen,1118,'ARAM_CriticalHealing',['治疗和护盾可以暴击']) && af.crit) add('augments', 5, `与已选「${chosen.name}」的治疗暴击联动`);
-      else if (verifiedAugment(chosen,1030,'ARAM_Eureka',['法术强度的技能急速']) && af.ap) add('augments', 4, `新增法强也可供已选「${chosen.name}」转化急速`);
+      else if (verifiedAugment(chosen,1030,'ARAM_Eureka',['法术强度的技能急速']) && af.ap && !equipment.conversions.some(rule=>rule.from==='ap')) add('augments', 4, `新增法强也可供已选「${chosen.name}」转化急速`);
     }
     components.equipment = Math.max(-18, Math.min(18, components.equipment));
     components.augments = Math.max(-18,Math.min(12, components.augments));
@@ -176,7 +197,7 @@ function scoreAugments({ augments = [], champion = null, ownItems = null, select
     if (!selectedKnown) reasons.push(selected.length ? '已选记录为自动推断或可能不完整，联动仅作参考' : '已选海克斯记录可能不完整，尚无可用联动记录');
     const confidence = !contextKnown ? 'low' : a.scope === 'champion' && features.known && selectedKnown ? 'medium' : 'low';
     return { id: a.id, score: clamp(Object.values(components).reduce((sum, n) => sum + n, 0)), label: INDEX_LABEL,
-      components, reasons, dependency, constraints, confidence, sourceScope: a.scope || 'global', selectedKnown, itemsKnown: features.known };
+      components, reasons, dependency, constraints, conversions:equipment.conversions, confidence, sourceScope: a.scope || 'global', selectedKnown, itemsKnown: features.known };
   });
 }
 
@@ -192,9 +213,10 @@ function championProfile(champion, staticData = bundledStatic) {
     attackRange,longRange:attackRange===null?null:attackRange>=500,marksman:tags.includes('Marksman'),known: tags.length > 0 };
 }
 function summarizeComposition(champions, staticData = bundledStatic) {
-  const summary = { physical: 0, magic: 0, frontline: 0, support: 0, unknown: 0, longRange:0,rangeKnown:0,marksmen:0,count: champions.length, label: '职业与基础普攻射程覆盖估计，非实际伤害占比' };
+  const summary = { physical: 0, magic: 0, frontline: 0, support: 0, unknown: 0, rolesUnknown:0,rolesKnown:0,damageKnown:0,longRange:0,rangeKnown:0,marksmen:0,count: champions.length, label: '职业与基础普攻射程覆盖估计，非实际伤害占比' };
   for (const c of champions) {
     const p = championProfile(c, staticData); summary[p.damage]++; summary.frontline += p.frontline; summary.support += p.support;
+    if(p.known)summary.rolesKnown++;else summary.rolesUnknown++;if(p.damage!=='unknown')summary.damageKnown++;
     if(p.attackRange!==null){summary.rangeKnown++;if(p.longRange)summary.longRange++;}if(p.marksman)summary.marksmen++;
   }
   return summary;
@@ -202,7 +224,7 @@ function summarizeComposition(champions, staticData = bundledStatic) {
 function rankDraft({ catalog, team = [], availableChampionIds = [], selfId = null, staticData = bundledStatic } = {}) {
   const champions = Array.isArray(catalog) ? catalog : catalog?.champions || [];
   const selfEntry = team.find(p => p.isSelf);
-  const currentId = selfEntry?.championId || selfId;
+  const currentId = itemId(selfEntry?.championId) || itemId(selfId);
   let removedFallback = false;
   const teammates = team.filter(p => {
     if (p.isSelf) return false;
@@ -211,26 +233,27 @@ function rankDraft({ catalog, team = [], availableChampionIds = [], selfId = nul
   }).map(p => champions.find(c => c.id === p.championId) || { id: p.championId || null });
   const taken = new Set(teammates.map(c => c.id));
   const composition = summarizeComposition(teammates, staticData);
-  const candidates = [...new Set(availableChampionIds)].filter(id => id === currentId || !taken.has(id)).map(id => champions.find(c => c.id === id)).filter(Boolean).map(c => {
+  const candidates = [...new Set([...availableChampionIds,currentId].map(itemId).filter(Boolean))].filter(id => id === currentId || !taken.has(id)).map(id => champions.find(c => c.id === id)).filter(Boolean).map(c => {
     const tierBase = Number.isInteger(c.tier) ? TIER_SCORE[c.tier] ?? null : null;
     const profile = championProfile(c, staticData), reasons = [], components = { tier: tierBase, rank: 0, composition: 0 };
     if (tierBase !== null) reasons.push(`OP.GG T${c.tier}`);
     if (Number.isInteger(c.rank) && c.rank > 0) { components.rank = Math.max(0, Math.round(5 * (1 - (c.rank - 1) / Math.max(1, champions.length - 1)))); reasons.push(`OP.GG 综合排名 ${c.rank}`); }
-    if (teammates.length >= 2 && composition.unknown === 0 && profile.known) {
+    if (teammates.length >= 2 && composition.rolesUnknown === 0 && profile.known) {
       if (composition.frontline < 1 && profile.frontline >= 1) { components.composition += 12; reasons.push('补足当前队伍前排'); }
       else if (composition.frontline < .5 && profile.frontline > 0) { components.composition += 5; reasons.push('增加近战承伤角色'); }
-      if (composition.magic === 0 && composition.physical >= 2 && profile.damage === 'magic') { components.composition += 9; reasons.push('补充队伍的法术输出方向'); }
-      if (composition.physical === 0 && composition.magic >= 2 && profile.damage === 'physical') { components.composition += 9; reasons.push('补充队伍的物理输出方向'); }
+      if (composition.unknown === 0 && composition.magic === 0 && composition.physical >= 2 && profile.damage === 'magic') { components.composition += 9; reasons.push('补充队伍的法术输出方向'); }
+      if (composition.unknown === 0 && composition.physical === 0 && composition.magic >= 2 && profile.damage === 'physical') { components.composition += 9; reasons.push('补充队伍的物理输出方向'); }
       if (composition.support === 0 && composition.frontline >= 1 && profile.support) { components.composition += 4; reasons.push('为已有前排补充辅助功能'); }
       if (composition.support >= 2 && profile.support) { components.composition -= 6; reasons.push('队伍辅助角色较多，需要留意持续输出'); }
       if(composition.rangeKnown===teammates.length&&composition.longRange===0&&profile.longRange){components.composition+=4;reasons.push(`补充基础普攻射程：${profile.attackRange}（Riot 静态值，不含技能与强化）`);}
       if(composition.marksmen===0&&composition.frontline>=1&&profile.marksman){components.composition+=3;reasons.push('已有前排，补充射手职业覆盖；持续输出仍取决于构筑');}
-    } else reasons.push(composition.unknown > 0 ? '部分队友英雄尚未识别，不判断阵容缺少的职责' : '队友信息不足，暂不计阵容修正');
+      if(composition.unknown>0)reasons.push('部分队友的伤害方向无法由职业确定；仅按已知职责和射程补位');
+    } else reasons.push(composition.rolesUnknown > 0 ? '部分队友英雄尚未识别，不判断阵容缺少的职责' : '队友信息不足，暂不计阵容修正');
     const score = tierBase === null ? null : clamp(tierBase + components.rank + components.composition);
     const winRate = finite(c.winRate) && c.winRate >= 0 && c.winRate <= 100 && c.winRateSource === 'OP.GG' ? c.winRate : null;
     return { ...c, championId: c.id, score, label: INDEX_LABEL, components, reasons, isCurrent: c.id === currentId,
       winRate, winRateNotice: winRate === null ? 'OP.GG 当前页面未提供可核实胜率' : 'OP.GG',
-      composition: summarizeComposition([...teammates, c], staticData), profile, confidence: teammates.length >= 2 && composition.unknown === 0 && profile.known ? 'medium' : 'low' };
+       composition: summarizeComposition([...teammates, c], staticData), profile, confidence: teammates.length >= 2 && composition.rolesUnknown === 0 && profile.known ? 'medium' : 'low' };
   }).sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || (a.rank ?? Infinity) - (b.rank ?? Infinity));
   return { candidates, best: candidates.find(c => c.score !== null) || null, composition,
     label: INDEX_LABEL, notice: '仅比较当前英雄与共享备选池；阵容适配是职业规则估计，未统计队伍胜率。' };
@@ -243,12 +266,13 @@ function buildRecommendations({ builds = [], ownItems = null, selectedAugments =
   const ownedPen=new Set([...owned].map(id=>penetrationKind(id,metadata)).filter(Boolean));
   return list(builds).map(group => ({ name: group.name, itemsKnown:known, rows: list(group.rows).map(items => {
     const seen=new Set(),plannedPen=new Set();
-    const annotated = list(items).filter(item => item&&itemId(item)&&!isPoroSnack(item, metadata[item.id]?.name)).filter(item=>{
-      if(seen.has(item.id))return false;seen.add(item.id);return true;
+    const annotated = list(Array.isArray(items)?items:items?.items).filter(item => item&&itemId(item)&&!isPoroSnack(item, metadata[itemId(item)]?.name)).map(item=>typeof item==='object'?{...item,id:itemId(item)}:{id:itemId(item),name:metadata[itemId(item)]?.name||String(item)}).filter(item=>{
+      if([...seen].some(id=>sameItem(id,item.id,metadata)))return false;seen.add(item.id);return true;
     }).map(item => {
       const held=known?ownsItemOrUpgrade(item.id,owned,metadata):null,reasons=itemRestrictions(item.id,selectedAugments,staticData);
       if(!held&&QUEST_REWARDS.has(item.id))reasons.push('强化任务奖励，按任务说明获取；不直接作为购买目标');
-      const dependency=dependencies.find(d=>d.items.some(i=>i.id===item.id));
+      if(!held&&metadata[item.id]?.gold?.purchasable===false)reasons.push('Riot 资料标记为不可直接购买；保留路线展示，需按游戏升级或任务条件获取');
+      const dependency=dependencies.find(d=>d.items.some(i=>sameItem(i.id,item.id,metadata)));
       if(dependency?.status==='reward-owned')reasons.push(dependency.reason);
       const family=penetrationKind(item.id,metadata);
       if(family&&!held&&(ownedPen.has(family)||plannedPen.has(family)))reasons.push('已拥有或路线已包含同类百分比穿透成品；作为备选，不重复补购');
@@ -285,9 +309,9 @@ function matchupRecommendations({ champion = null, ownItems = null, team = [], o
   const hasFinishedPenetration = kind => own.some(item => finishedPenetration(metadata[idOf(item)], idOf(item), kind));
   const hasOwn = predicate => own.some(item => predicate(metadata[idOf(item)]));
   const ownsOrUpgrade = id => ownsItemOrUpgrade(id,owned,metadata);
-  const features = itemFeatures(ownItems, staticData), profile = championProfile(champion, staticData);
   const selected=list(selectedAugments).filter(a=>a&&Number.isInteger(a.id));
-  const hasStatConversion=selected.some(a=>verifiedAugment(a,1205,'ARAM_ADAPt',['额外攻击力转化为法术强度'])||verifiedAugment(a,1206,'ARAM_escAPADe',['法术强度转化为额外攻击力']));
+  const equipment=equipmentContext(ownItems,selected,staticData),features=equipment.effective,profile=championProfile(champion,staticData);
+  const hasStatConversion=equipment.conversions.some(rule=>['ad','ap'].includes(rule.from)||['ad','ap'].includes(rule.to));
   const damage = hasStatConversion?'unknown':features.ap >= 60 && features.ad >= 40 ? 'mixed' : features.ap >= 60 ? 'magic' : features.ad >= 40 ? 'physical' : profile.damage;
   const enemyPlayers = list(opponents).filter(p => p && typeof p === 'object');
   const allyPlayers = list(team).filter(p => p && typeof p === 'object' && !p.isSelf);
@@ -321,6 +345,8 @@ function matchupRecommendations({ champion = null, ownItems = null, team = [], o
   const cautions=dependencies.filter(d=>d.status!=='missing').map(d=>d.reason);
   if(selected.some(a=>disablesUltimate(a)&&!['api','confirmed'].includes(a.confidence)))cautions.push('「回归基本功」记录尚待确认；若已选择，终极技能依赖效果将无法触发');
   if(hasStatConversion)cautions.push('已选强化包含攻击力/法强转化；装备原始属性不等于当前伤害方向，暂不据此推荐穿透');
+  cautions.push(...equipment.conversions.map(rule=>rule.reason));
+  if(equipment.conversions.some(a=>equipment.conversions.some(b=>a.augmentId!==b.augmentId&&a.to===b.from)))cautions.push('多个属性转换相连；结算顺序和转化结果未读取，不叠加估算收益');
   if(selected.some(a=>verifiedAugment(a,1346,'Vampirism',['不再能够被友军治疗或获得生命回复'])))cautions.push('「吸血习性」禁用友军治疗和生命回复；不要把回复装备属性当作仍可用的收益');
   const evidence = {
     source: '本机公开对局装备 + Riot 静态装备资料；候选优先保留 OP.GG 顺序',
@@ -330,7 +356,8 @@ function matchupRecommendations({ champion = null, ownItems = null, team = [], o
     allyPlayers: allyPlayers.length, allyInventoriesKnown: allyPlayers.filter(p => Array.isArray(p.items)).length,
     armorHolders, resistanceHolders, sustainHolders, allyAntiHeal,
     confirmedSelectedAugmentIds: [...new Set(confirmedAugments.map(a => a.id))], completeAugments: false,
-    usedSelectedAugmentIds:[...new Set(dependencies.map(d=>d.augmentId))],opponentAugmentsKnown:false,
+    usedSelectedAugmentIds:[...new Set([...dependencies.map(d=>d.augmentId),...equipment.conversions.map(rule=>rule.augmentId)])],opponentAugmentsKnown:false,
+    statConversions:equipment.conversions,conversionAmountsKnown:false,
   };
   const recommendations = [];
   const baseIds = [],coreIds=[];
@@ -344,7 +371,7 @@ function matchupRecommendations({ champion = null, ownItems = null, team = [], o
     const meta = metadata[id];
     return meta && typeof meta.name === 'string' && meta.gold?.purchasable === true && !QUEST_REWARDS.has(id) && !isPoroSnack({ id, name: meta.name }) &&
       !ownsOrUpgrade(id) && !itemRestrictions(id,selected,staticData).length &&
-      !dependencies.some(d=>d.status==='reward-owned'&&d.items.some(i=>i.id===id)) &&
+      !dependencies.some(d=>d.status==='reward-owned'&&d.items.some(i=>sameItem(i.id,id,metadata))) &&
       !(penetrationKind(id,metadata)&&hasFinishedPenetration(penetrationKind(id,metadata))) && predicate(meta, id);
   });
   const add = (id, reason, priority, {kind='matchup',augmentIds=[],tentative=false}={}) => {
@@ -366,14 +393,20 @@ function matchupRecommendations({ champion = null, ownItems = null, team = [], o
       const tentative=!['api','confirmed'].includes(augment.confidence),prefix=tentative?'若已选记录正确，':'已选',options={kind:'synergy',augmentIds:[augment.id],tentative};
       let candidate=null,reason='';
       if(verifiedAugment(augment,1029,'ARAM_EtherealWeapon',['技能可施加攻击特效'])){
-        const desired=features.ap>=60?'FlatMagicDamageMod':features.ad>=40?'FlatPhysicalDamageMod':profile.damage==='magic'?'FlatMagicDamageMod':profile.damage==='physical'?'FlatPhysicalDamageMod':null;
+        const desired=features.ap>=60?'FlatMagicDamageMod':features.ad>=40?'FlatPhysicalDamageMod':hasStatConversion?null:profile.damage==='magic'?'FlatMagicDamageMod':profile.damage==='physical'?'FlatPhysicalDamageMod':null;
         if(desired){candidate=choose(meta=>/攻击特效/.test(text(meta))&&stat(meta,desired)>0,desired==='FlatMagicDamageMod'?[3115]:[3153],synergyIds);reason='技能可施加攻击特效；该装备描述含攻击特效，具体触发限制仍按游戏说明';}
-      }else if(verifiedAugment(augment,1030,'ARAM_Eureka',['30%法术强度的技能急速'])){
+      }else if(verifiedAugment(augment,1030,'ARAM_Eureka',['30%法术强度的技能急速'])&&!equipment.conversions.some(rule=>rule.from==='ap')){
         candidate=choose(meta=>stat(meta,'FlatMagicDamageMod')>0,[],synergyIds);reason='法术强度还能按强化描述转为技能急速，优先保留现有 OP.GG 法强路线';
       }else if(verifiedAugment(augment,1048,'ARAM_JeweledGauntlet',['技能可以造成暴击'])&&(features.ad>=40||profile.marksman)){
         candidate=choose(meta=>stat(meta,'FlatCritChanceMod')>0&&stat(meta,'FlatPhysicalDamageMod')>0,[3031],synergyIds);reason='技能能够暴击；当前攻击构筑可考虑继续补充暴击几率';
       }else if(verifiedAugment(augment,1118,'ARAM_CriticalHealing',['治疗和护盾可以暴击'])){
         candidate=choose(meta=>stat(meta,'FlatCritChanceMod')>0,[],synergyIds);reason='治疗和护盾可以暴击；只从已有 OP.GG 路线筛选暴击装备，不据此强行改成攻击构筑';
+      }
+      const conversion=CONVERSIONS.find(rule=>verifiedAugment(augment,rule.id,rule.key,rule.words));
+      if(conversion){
+        const sourceStat={ad:'FlatPhysicalDamageMod',ap:'FlatMagicDamageMod',attackSpeed:'PercentAttackSpeedMod',health:'FlatHPPoolMod',mana:'FlatMPPoolMod'}[conversion.from];
+        candidate=choose(meta=>stat(meta,sourceStat)>0,[],synergyIds);
+        reason=`已有 OP.GG 路线中的${conversion.fromLabel}${conversion.partial?'有一部分':''}会转为${conversion.toLabel}；按转换用途考虑，原属性收益和转换后数值不作保证`;
       }
       if(candidate){add(candidate,`${prefix}「${augment.name}」：${reason}`,tentative?42:60,options);evidence.usedSelectedAugmentIds.push(augment.id);}
     }
@@ -381,11 +414,13 @@ function matchupRecommendations({ champion = null, ownItems = null, team = [], o
       add(choose((meta, id) => finishedPenetration(meta, id, 'magic'), [3135, 3137]), `已读到 ${resistanceHolders.length} 名对手的装备提供至少 30 魔抗；当前偏法术方向，可考虑百分比法穿。这不是对手总魔抗。`, 80);
     }
     if (damage === 'physical' && armorHolders.length && !hasFinishedPenetration('physical')) {
-      add(choose((meta, id) => finishedPenetration(meta, id, 'physical'), features.crit > 0 ? [3036, 3033, 6694] : [6694, 3036, 3033]), `已读到 ${armorHolders.length} 名对手的装备提供至少 50 护甲；当前偏物理方向，可考虑百分比护甲穿透。这不是对手总护甲。`, 80);
+      const combined=sustainHolders.length&&!hasOwn(antiHeal)&&!allyAntiHeal.length?choose((meta,id)=>finishedPenetration(meta,id,'physical')&&antiHeal(meta),[3033]):null;
+      add(combined||choose((meta, id) => finishedPenetration(meta, id, 'physical'), features.crit > 0 ? [3036, 3033, 6694] : [6694, 3036, 3033]), `已读到 ${armorHolders.length} 名对手的装备提供至少 50 护甲；当前偏物理方向，可考虑百分比护甲穿透。这不是对手总护甲。`, 80);
     }
     if (sustainHolders.length && !hasOwn(antiHeal) && ['magic', 'physical'].includes(damage)) {
       const candidates = damage === 'magic' ? [3916, 3165] : [3123, 6609, 3033];
-      const id = choose(meta => antiHeal(meta) && stat(meta, damage === 'magic' ? 'FlatMagicDamageMod' : 'FlatPhysicalDamageMod') > 0, candidates);
+      const id = choose((meta,id) => antiHeal(meta) && stat(meta, damage === 'magic' ? 'FlatMagicDamageMod' : 'FlatPhysicalDamageMod') > 0 &&
+        !recommendations.some(rec=>rec.item.id!==id&&penetrationKind(id,metadata)&&penetrationKind(rec.item.id,metadata)===penetrationKind(id,metadata)), candidates);
       const coverage = allyAntiHeal.length ? `队友已有 ${allyAntiHeal.length} 人持有重伤装备，降低补购优先级；实际命中覆盖仍未知。` :
         allyPlayers.length && evidence.allyInventoriesKnown === allyPlayers.length ? '已读取的队友装备中未见重伤；效果仍需命中目标。' : '队友装备信息不完整，不推断队伍缺少重伤。';
       add(id, `对手已持有吸血类装备，可考虑重伤以应对回复。${coverage}`, allyAntiHeal.length ? 35 : 70);
@@ -424,4 +459,4 @@ function rerollAdvice({ offeredIds = [], scores = [], augments = [], rerollsRema
   if (best < 62 && stronger.length >= 5) return { action: 'consider-reroll', label: remainingKnown ? '可考虑刷新' : '有次数可考虑刷新', reason: `${remainingKnown ? '' : '若仍有刷新次数，'}当前最高指数 ${best}；已知同品质列表有 ${stronger.length} 个高出至少 12 分的选项，可考虑刷新。刷新池和概率未知。${caveat}`, ...context, strongerKnownCount: stronger.length };
   return { action: 'keep', label: '倾向保留', reason: `当前已有 ${best} 分选项，倾向保留；指数为规则参考。${caveat}`, ...context };
 }
-module.exports = { INDEX_LABEL, scoreAugments, rankDraft, buildRecommendations, matchupRecommendations, rerollAdvice, itemFeatures, championProfile, summarizeComposition, augmentDependency, bundledStatic };
+module.exports = { INDEX_LABEL, scoreAugments, rankDraft, buildRecommendations, matchupRecommendations, rerollAdvice, itemFeatures, equipmentContext, championProfile, summarizeComposition, augmentDependency, bundledStatic };
