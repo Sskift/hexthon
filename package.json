@@ -10,6 +10,7 @@
     "test": "node --test tests/*.test.cjs",
     "test:ui": "node scripts/run-smoke.cjs",
     "test:api": "node scripts/run-api-smoke.cjs",
+    "probe:overwolf": "node scripts/run-overwolf-probe.cjs",
     "sync": "node scripts/sync-data.cjs",
     "package": "node scripts/package.cjs"
   },

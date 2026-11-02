@@ -11,10 +11,15 @@ const {prepareTemplates,matchAugmentIcons,AugmentIconTracker}=require('./core/au
 const { scoreAugments, rankDraft, buildRecommendations, matchupRecommendations, rerollAdvice } = require('./core/recommendations.cjs');
 const { DEFAULTS, validateSettings } = require('./core/settings.cjs');
 const { cardBounds, shopBounds } = require('./core/overlay-layout.cjs');
+const {WindowCapture}=require('./core/window-capture.cjs');
+const sceneGate=require('./core/scene-gate.cjs');
+const {titleOffer}=require('./core/light-offer.cjs');
+const {visualContext,sameVisualContext,isCurrentVisualContext,captureMatchesContext,trackingPresentation}=require('./core/visual-context.cjs');
 
 const apiSmoke=process.argv.includes('--api-smoke-test');
 const smoke = process.argv.includes('--smoke-test')||apiSmoke;
-const visualMode=process.argv.includes('--visual-experimental')||(smoke&&!apiSmoke);
+const lightVisualMode=process.argv.includes('--visual-light-experimental');
+const visualMode=lightVisualMode||process.argv.includes('--visual-experimental')||(smoke&&!apiSmoke);
 if(!visualMode)app.disableHardwareAcceleration();
 app.setName('Hexthon');
 if (smoke) app.setPath('userData', path.resolve(__dirname, '../.qa/profile'));
@@ -24,11 +29,12 @@ let lastOffer = null, tracker = new OfferTracker(), inferredMode = false, captur
 const shopTracker=new ShopTracker({observationTtlMs:5000});
 const iconTracker=new AugmentIconTracker(),ignoredVisualSelections=new Set();
 let iconTemplates=[];
+let windowCapture,rerollTemplates=[],lightCache=null;
 let lastLiveTime = null, lastGameId = null, liveLostAt = 0;
 const consumedSelections = new Set();
 const cardWindows = [];
 let settings = { ...DEFAULTS };
-const state = { version:'0.2.2', recognitionMode:visualMode?'visual':'api', captureEnabled:visualMode, catalog:null, selectedChampion:null, augments:[], builds:[],
+const state = { version:'0.2.2', recognitionMode:lightVisualMode?'visual-light':visualMode?'visual':'api', captureEnabled:visualMode, catalog:null, selectedChampion:null, augments:[], builds:[],
   augmentMeta:null, buildMeta:null, game:{phase:'Disconnected',lcuConnected:false,liveConnected:false,team:[],bench:[],ownItems:null},
   offeredIds:[], selectedAugments:[], augmentScores:[], reroll:null, draft:null, buildSuggestions:[], matchup:null,
   offer:{cards:[],stable:false,present:false}, shop:{visible:false}, visualSelection:{matches:[],pending:[]}, overlayMode:null, selectionHistoryComplete:false, monitor:{game:null,client:null}, autoStatus:visualMode?'正在寻找英雄联盟窗口…':'正在连接本地客户端接口…',
@@ -87,7 +93,7 @@ function applyBounds(win,bounds) {
 function activeMayhem() { return state.game.isMayhem||state.modeConfirmed||inferredMode; }
 function layout() {
   if(!overlay){state.overlayVisible=false;state.overlayEnabled=false;state.overlayMode=null;return;}
-  const w=state.monitor.game,gameRect=nativeRect(w);
+  const w=state.monitor.game,gameRect=nativeRect(lightVisualMode&&w?.clientRect?w.clientRect:w);
   state.overlayEnabled=settings.autoOverlay&&manualOverlay!==false;
   const eligible=Boolean(state.overlayEnabled&&state.game.phase==='InProgress'&&activeMayhem()&&w?.foreground&&w?.visible&&!w?.minimized);
   const cardRects=state.offer.cards.map(card=>cardBounds(gameRect,card));
@@ -120,6 +126,7 @@ async function loadChampion(key,force=false){
   state.loading=false;state.error=errors.join('；');recalculate();publish();
 }
 function resetGame(){
+  lightCache=null;
   gameEpoch++;tracker.reset();lastOffer=null;inferredMode=false;manualOverlay=null;trackingSignature='';
   consumedSelections.clear();
   iconTracker.reset();ignoredVisualSelections.clear();state.visualSelection={matches:[],pending:[]};
@@ -128,14 +135,14 @@ function resetGame(){
   state.ocr={status:'idle',matches:[],text:''};
 }
 function pointer(snapshot){
-  const w=snapshot.game,c=snapshot.cursor;
+  const game=snapshot.game,w=lightVisualMode&&game?.clientRect?{...game,...game.clientRect}:game,c=snapshot.cursor;
   return w&&c?{x:(c.x-w.x)/w.width,y:(c.y-w.y)/w.height,leftDown:c.leftDown,leftPressed:c.leftPressed,pressId:c.pressId,active:Boolean(w.foreground&&!w.minimized&&c.active!==false),at:snapshot.observedAt}: {active:false,leftDown:false};
 }
 function consumeTracking(result){
   if(!result)return;
-  const signature=JSON.stringify(result);
+  const {signature,offer}=trackingPresentation(result,lastOffer);
   if(signature===trackingSignature)return;trackingSignature=signature;
-  state.offer={cards:result.cards||[],stable:Boolean(result.stable),present:lastOffer?.cards?.length===3,pendingSelection:result.pendingSelection||null};
+  state.offer=offer;
   state.offeredIds=state.offer.stable?state.offer.cards.map(c=>c.id):[];
   const selections=Array.isArray(result.selected)?result.selected:result.selected?[result.selected]:[];
   for(const pick of selections){
@@ -150,9 +157,9 @@ function consumeTracking(result){
   recalculate();layout();publish();
 }
 function onWindowUpdate(snapshot){
-  const lostForeground=state.monitor.game?.foreground&&!snapshot.game?.foreground;
+  const changed=!sameVisualContext(visualContext(state.monitor.game,lightVisualMode),visualContext(snapshot.game,lightVisualMode));
   state.monitor=snapshot;
-  if(lostForeground){state.shop=shopTracker.invalidate();iconTracker.invalidate();lastOffer=null;consumeTracking(tracker.invalidate());}
+  if(changed){gameEpoch++;lightCache=null;state.shop=shopTracker.invalidate();iconTracker.invalidate();lastOffer=null;consumeTracking(tracker.invalidate());}
   if(!state.game.lcuConnected&&!state.game.liveConnected)state.autoStatus=snapshot.client?'已发现客户端窗口，正在连接…':'等待英雄联盟客户端…';
 }
 async function pollGame(){
@@ -172,7 +179,7 @@ async function pollGame(){
     if(state.game.liveConnected){
       if(Number.isFinite(state.game.gameTime))lastLiveTime=state.game.gameTime;
       liveLostAt=0;
-      if(visualMode&&state.game.gameTime!=null&&state.game.gameTime<5)state.selectionHistoryComplete=true;
+      if(visualMode&&!lightVisualMode&&state.game.gameTime!=null&&state.game.gameTime<5)state.selectionHistoryComplete=true;
     }
     if(Array.isArray(state.game.ownSelectedAugmentIds)){
       state.selectionHistoryComplete=true;
@@ -201,10 +208,14 @@ async function scanGame(){
   if(captureBusy||ocr.busy)return;
   if(!state.game.liveConnected||!w?.foreground||w.minimized||!w.visible)throw new Error('等待游戏窗口进入前台后自动识别');
   if(!activeMayhem() && (state.game.queueId || !/ARAM/i.test(state.game.gameMode||'')))throw new Error('当前不是已确认的海克斯模式');
+  const context=visualContext(w,lightVisualMode);
+  if(!context)throw new Error('游戏窗口尺寸与缩放尚未确认');
   captureBusy=true;captureAt=Date.now();const epoch=gameEpoch;
+  const current=()=>epoch===gameEpoch&&!quitting&&isCurrentVisualContext(context,state.monitor.game);
   try{
+    if(lightVisualMode){await scanLightGame(w,context,current);return;}
     const sources=await desktopCapturer.getSources({types:['window'],thumbnailSize:{width:2560,height:1440},fetchWindowIcons:false});
-    if(epoch!==gameEpoch||quitting)return;
+    if(!current())return;
     const source=sources.find(s=>{try{return BigInt(s.id.split(':')[1])===BigInt(w.hwnd);}catch{return false;}});
     if(!source||source.thumbnail.isEmpty())throw new Error('游戏窗口画面暂不可用，请使用无边框模式');
     const iconStart=Date.now(),size=source.thumbnail.getSize();
@@ -220,14 +231,14 @@ async function scanGame(){
     recalculate();
     state.ocr={...state.ocr,status:'running'};
     let result=await ocr.read(source.thumbnail,{x:.08,y:.08,width:.84,height:.84},state.catalog.augments);
-    if(epoch!==gameEpoch||quitting)return;
+    if(!current())return;
     state.shop=shopTracker.observe(detectShop(result));
     lastOffer=locateOffer(result,state.catalog.augments);
     // A tighter second pass preserves small title strokes when the wider shop
     // scan found augment names but could not establish the three-card layout.
     if(!lastOffer.cards.length&&result.matches.filter(m=>m.exact).length>=2){
       result=await ocr.read(source.thumbnail,settings.ocrRegion,state.catalog.augments);
-      if(epoch!==gameEpoch||quitting)return;
+      if(!current())return;
       lastOffer=locateOffer(result,state.catalog.augments);
     }
     lastOffer.observedAt=result.capturedAt||new Date().toISOString();
@@ -237,12 +248,61 @@ async function scanGame(){
     state.offer.present=lastOffer.cards?.length===3;
     consumeTracking(tracker.observe(lastOffer,pointer(state.monitor)));
     layout();publish();
-  }catch(error){state.shop=shopTracker.invalidate();state.offer.present=false;lastOffer=null;consumeTracking(tracker.invalidate());state.ocr={...state.ocr,status:'error',message:error.message};state.autoStatus=error.message;publish();}
+  }catch(error){if(!current())return;lightCache=null;state.shop=shopTracker.invalidate();state.offer.present=false;lastOffer=null;consumeTracking(tracker.invalidate());state.ocr={...state.ocr,status:'error',message:error.message};state.autoStatus=error.message;publish();}
   finally{captureBusy=false;}
+}
+async function scanLightGame(w,context,current){
+  const started=performance.now(),client=context.rect;
+  const geometry=client&&sceneGate.layout(client.width,client.height);
+  if(!geometry)throw new Error('轻量实验：客户区尺寸尚未确认');
+  windowCapture??=new WindowCapture();
+  const frame=await windowCapture.capture({hwnd:w.hwnd,region:geometry.rerollRegion,maxWidth:1800});
+  if(!current())return;
+  if(!captureMatchesContext(frame,context)){lightCache=null;throw new Error('窗口位置、尺寸或缩放变化，等待下一次采样');}
+  const gateStart=performance.now();
+  const gate=sceneGate.detectRerolls({...frame,clientWidth:client.width,clientHeight:client.height},rerollTemplates);
+  const stats={mode:'targeted-gdi',gateMs:Math.round(performance.now()-gateStart),gateScore:gate.score,
+    capturedPixels:frame.width*frame.height,ocrRan:false,ocrCacheHit:false};
+  state.shop=shopTracker.invalidate();
+  if(!gate.present){
+    lightCache=null;lastOffer={cards:[],observedAt:frame.capturedAt};
+    state.ocr={status:'idle',matches:[],text:'',message:'轻量实验：未检测到选卡按钮，不运行 OCR'};
+    state.autoStatus='轻量实验：只检查按钮小区域；未启用商店识别';
+    state.capturePerformance={...stats,totalMs:Math.round(performance.now()-started)};
+    consumeTracking(tracker.observe(lastOffer,pointer(state.monitor)));return;
+  }
+  const titles=await windowCapture.capture({hwnd:w.hwnd,region:geometry.titleRegion,maxWidth:2200});
+  if(!current())return;
+  if(!captureMatchesContext(titles,context)){lightCache=null;throw new Error('窗口位置、尺寸或缩放变化，等待下一次采样');}
+  stats.capturedPixels+=titles.width*titles.height;
+  const fingerprint=sceneGate.fingerprint({...titles,clientWidth:client.width,clientHeight:client.height});
+  const cached=state.offer.stable&&lightCache&&sameVisualContext(lightCache.context,context)&&Date.now()-lightCache.at<2000&&
+    !sceneGate.fingerprintChanged(lightCache.fingerprint,fingerprint);
+  if(cached){lastOffer=lightCache.offer;stats.ocrCacheHit=true;}
+  else{
+    state.ocr={...state.ocr,status:'running'};
+    const bitmap=nativeImage.createFromBitmap(titles.bgraBuffer,{width:titles.width,height:titles.height});
+    const result=await ocr.read(bitmap,{x:0,y:0,width:1,height:1},state.catalog.augments,{allowSmall:true,allowFallback:false});
+    if(!current())return;
+    stats.ocrRan=true;stats.ocrMs=result.timings?.totalMs??null;
+    state.ocr={...result,status:'done',message:'轻量实验：只识别标题条'};
+    lastOffer=titleOffer(result,titles.region,geometry,state.catalog.augments,titles.capturedAt);
+    if(lastOffer.cards.length===3)lightCache={context,at:Date.now(),fingerprint,offer:lastOffer};
+    else{
+      // A visible button with an unreadable title is not a selection/close event.
+      lightCache=null;lastOffer=null;consumeTracking(tracker.invalidate());state.offer.present=true;
+      state.capturePerformance={...stats,totalMs:Math.round(performance.now()-started)};
+      state.autoStatus='轻量实验：选卡按钮可见，标题尚未读全';layout();publish();return;
+    }
+  }
+  if(lastOffer?.cards?.length===3)inferredMode=true;
+  state.autoStatus=stats.ocrCacheHit?'轻量实验：标题未变，复用识别结果':'轻量实验：已识别三个标题，等待稳定确认';
+  state.capturePerformance={...stats,totalMs:Math.round(performance.now()-started)};
+  consumeTracking(tracker.observe(lastOffer,pointer(state.monitor)));
 }
 async function scanLoop(){
   if(settings.autoScan&&state.monitor.game?.foreground&&state.game.liveConnected&&!captureBusy)await scanGame().catch(()=>{});
-  if(!quitting&&!smoke)scanTimer=setTimeout(scanLoop,1300);
+  if(!quitting&&!smoke)scanTimer=setTimeout(scanLoop,lightVisualMode?900:1300);
 }
 async function writeStatus(){
   const payload={version:state.version,pid:process.pid,updatedAt:new Date().toISOString(),phase:state.game.phase,
@@ -250,7 +310,7 @@ async function writeStatus(){
     champion:state.selectedChampion?.key,autoStatus:state.autoStatus,autoScan:settings.autoScan,autoFollow:settings.autoFollow,recognitionMode:state.recognitionMode,captureEnabled:visualMode,windowMonitorEnabled:Boolean(monitor),windowCount:BrowserWindow.getAllWindows().length,
     window:state.monitor.game||state.monitor.client||null,offeredIds:state.offeredIds,selectedAugments:state.selectedAugments,
     overlayVisible:state.overlayVisible,overlayMode:state.overlayMode,shop:state.shop,visualSelection:state.visualSelection,shopOverlay:overlay?{visible:overlay.isVisible(),bounds:overlay.getBounds()}:null,cardOverlays:cardWindows.map(w=>({visible:w.isVisible(),bounds:w.getBounds()})),
-    error:state.error,ocr:{status:state.ocr.status,message:state.ocr.message,lastCapture:captureAt},
+    error:state.error,ocr:{status:state.ocr.status,message:state.ocr.message,lastCapture:captureAt},capturePerformance:state.capturePerformance||null,
     itemIds:state.game.ownItems?.map(i=>i.id),availableChampionIds:state.game.availableChampionIds,
     matchup:state.matchup?{completeAugments:state.matchup.completeAugments,evidence:state.matchup.evidence,recommendations:state.matchup.recommendations}:null};
   await fs.mkdir(app.getPath('userData'),{recursive:true});
@@ -281,6 +341,7 @@ async function start(){
   let previous={};try{previous=JSON.parse(await fs.readFile(settingsFile(),'utf8'));}catch{}
   settings=validateSettings(previous.schemaVersion>=2?previous:{...previous,autoFollow:true,autoOverlay:true,autoScan:true});
   if(!visualMode)settings.autoScan=false;
+  if(lightVisualMode)settings.autoScan=true;
   if(smoke)settings={...DEFAULTS,autoScan:visualMode};
   provider=new OpggProvider(path.join(app.getPath('userData'),'cache'),path.resolve(__dirname,'../data/seed'));
   reader=new LeagueReader();
@@ -289,10 +350,14 @@ async function start(){
   if(!state.catalog)throw new Error('内置资料缺失，请重新解压完整安装包');
   try{staticData=JSON.parse(await fs.readFile(path.resolve(__dirname,'../data/static/riot.json'),'utf8'));}catch{}
   try{state.imageAssets=JSON.parse(await fs.readFile(path.resolve(__dirname,'../assets/manifest.json'),'utf8'));}catch{}
-  if(visualMode)iconTemplates=prepareTemplates(state.catalog.augments.flatMap(a=>{
+  if(visualMode&&!lightVisualMode)iconTemplates=prepareTemplates(state.catalog.augments.flatMap(a=>{
     const local=state.imageAssets[a.image?.split('?')[0]];if(!local)return [];
     const image=nativeImage.createFromPath(path.resolve(__dirname,'../assets/opgg',local));if(image.isEmpty())return [];
     return [{id:a.id,name:a.name,image:{...image.getSize(),bgraBuffer:image.toBitmap()}}];
+  }));
+  if(lightVisualMode)rerollTemplates=sceneGate.prepareTemplates(['reroll-unused.png','reroll-spent.png'].map(name=>{
+    const image=nativeImage.createFromPath(path.resolve(__dirname,'../assets/vision',name));
+    return {...image.getSize(),bgraBuffer:image.toBitmap()};
   }));
   const prefs={preload:path.join(__dirname,'preload.cjs'),nodeIntegration:false,contextIsolation:true,sandbox:true};
   const primary=screen.getPrimaryDisplay().workArea;
@@ -332,5 +397,5 @@ async function start(){
 }
 if(!app.requestSingleInstanceLock())app.quit();else app.whenReady().then(start).catch(error=>{console.error(error.stack||error);app.exit(1);});
 app.on('second-instance',()=>{if(panel)showPanel();});
-app.on('before-quit',()=>{quitting=true;clearTimeout(gameTimer);clearTimeout(scanTimer);clearInterval(viewTimer);clearInterval(statusTimer);globalShortcut.unregisterAll();monitor?.stop();ocr?.close().catch(()=>{});});
+app.on('before-quit',()=>{quitting=true;clearTimeout(gameTimer);clearTimeout(scanTimer);clearInterval(viewTimer);clearInterval(statusTimer);globalShortcut.unregisterAll();monitor?.stop();windowCapture?.close();ocr?.close().catch(()=>{});});
 app.on('window-all-closed',()=>{});

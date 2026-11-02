@@ -1,0 +1,37 @@
+const {normalize}=require('./matching.cjs');
+// OCR coordinates belong to the captured title strip. Restore client coordinates
+// before assigning words to cards; do not guess by dictionary substring matches.
+function titleOffer(result,region,geometry,augments,capturedAt) {
+  const none=reason=>({cards:[],confidence:0,reason,observedAt:capturedAt});
+  if(!geometry?.titles?.length||geometry.titles.length!==3||!geometry.cards?.length)return none('卡片布局不可用');
+  const words=(result?.lines||[]).flatMap(line=>line.words?.length?line.words:[line]).filter(w=>
+    typeof w.text==='string'&&[w.x,w.y,w.width,w.height].every(Number.isFinite)&&w.width>0&&w.height>0)
+    .map(w=>({...w,x:region.x+w.x*region.width,y:region.y+w.y*region.height,width:w.width*region.width,height:w.height*region.height}));
+  const names=new Map();
+  for(const augment of augments||[]) {
+    const key=normalize(augment.name);if(!key)continue;
+    if(!names.has(key))names.set(key,augment);else if(names.get(key)?.id!==augment.id)names.set(key,null);
+  }
+  const cards=[];
+  for(let i=0;i<3;i++) {
+    const title=geometry.titles[i],rect=geometry.cards[i];
+    const inside=words.filter(w=>{const x=w.x+w.width/2,y=w.y+w.height/2;return x>=title.x&&x<=title.x+title.width&&y>=title.y&&y<=title.y+title.height;});
+    // Preserve line order; minor character-box vertical differences inside a
+    // line must not reorder Chinese words. Wrapped titles are joined exactly.
+    const rows=[];
+    for(const word of inside.sort((a,b)=>a.y-b.y||a.x-b.x)) {
+      let row=rows.find(r=>Math.abs(r.y-word.y)<Math.min(r.height,word.height)*.55);
+      if(!row){row={y:word.y,height:word.height,words:[]};rows.push(row);}row.words.push(word);
+    }
+    const key=normalize(rows.sort((a,b)=>a.y-b.y).map(r=>r.words.sort((a,b)=>a.x-b.x).map(w=>w.text).join('')).join(''));
+    const augment=names.get(key);if(!augment)return none('标题未能精确匹配，暂不显示推荐');
+    const x=Math.min(...inside.map(w=>w.x)),y=Math.min(...inside.map(w=>w.y));
+    const titleRect={x,y,width:Math.max(...inside.map(w=>w.x+w.width))-x,height:Math.max(...inside.map(w=>w.y+w.height))-y};
+    cards.push({id:augment.id,name:augment.name,confidence:100,titleRect,rect,
+      selectionRect:{x:rect.x+rect.width*.06,y:rect.y+rect.height*.06,width:rect.width*.88,height:rect.height*.72},
+      estimated:true,geometrySource:'reroll-gated-title-layout'});
+  }
+  if(new Set(cards.map(c=>c.id)).size!==3)return none('候选标题重复，等待清晰画面');
+  return {cards,confidence:100,reason:'按钮图形与三个完整标题匹配',observedAt:capturedAt};
+}
+module.exports={titleOffer};

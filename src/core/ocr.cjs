@@ -1,10 +1,7 @@
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { gunzipSync } = require('node:zlib');
-const { randomUUID } = require('node:crypto');
-const { execFile } = require('node:child_process');
-const { promisify } = require('node:util');
-const exec = promisify(execFile);
+const { spawn } = require('node:child_process');
 const { createWorker } = require('tesseract.js');
 const { matchAugments } = require('./matching.cjs');
 
@@ -24,9 +21,89 @@ function normalizeOcrLines(lines, cropRect, croppedSize, originalSize) {
   }).filter(Boolean);
 }
 
+// One lazy Windows process owns its WinRT engine. The pipe transports a short
+// JSON header followed by exactly width*height*4 BGRA bytes, so the hot path
+// does not encode PNGs, write screenshots to disk, or start PowerShell per read.
+class WindowsOcrWorker {
+  constructor({ spawnProcess = spawn, timeoutMs = 15000, retryMs = 30000, now = Date.now } = {}) {
+    this.spawnProcess=spawnProcess;this.timeoutMs=timeoutMs;this.retryMs=retryMs;this.now=now;
+    this.child=null;this.pending=null;this.nextId=0;this.retryAt=0;this.closed=false;this.starts=0;
+  }
+  fail(child,error) {
+    if(this.child!==child)return;
+    this.child=null;this.retryAt=this.now()+this.retryMs;
+    const pending=this.pending;this.pending=null;
+    if(pending){clearTimeout(pending.timer);pending.reject(error);}
+    try{child.stdin.destroy();child.kill();}catch{}
+  }
+  launch() {
+    if(this.child)return this.child;
+    const child=this.spawnProcess('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.resolve(__dirname,'../native/ocr.ps1'),'-Worker'],
+      {windowsHide:true,stdio:['pipe','pipe','pipe']});
+    this.child=child;this.starts++;let buffer='';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data',chunk=>{
+      if(this.child!==child)return;
+      buffer+=chunk;
+      if(buffer.length>512000){this.fail(child,new Error('NATIVE_OCR_OUTPUT_LIMIT'));return;}
+      let newline;
+      while((newline=buffer.indexOf('\n'))!==-1){
+        const line=buffer.slice(0,newline).trim().replace(/^\uFEFF/,'');buffer=buffer.slice(newline+1);
+        if(!line)continue;
+        let reply;try{reply=JSON.parse(line);}catch{this.fail(child,new Error('NATIVE_OCR_PROTOCOL'));return;}
+        if(reply.ready===true)continue;
+        const pending=this.pending;
+        if(!pending||reply.id!==pending.id)continue;
+        if(reply.ok!==true||typeof reply.text!=='string'||!Array.isArray(reply.lines)){
+          this.fail(child,new Error('NATIVE_OCR_FAILED'));return;
+        }
+        clearTimeout(pending.timer);this.pending=null;pending.resolve(reply);
+      }
+    });
+    // Drain stderr but do not forward image text, filesystem paths or arbitrary
+    // native exceptions to the UI/logs. Exit/error still reject the active read.
+    child.stderr.on('data',()=>{});
+    child.stdin.on('error',()=>this.fail(child,new Error('NATIVE_OCR_PIPE')));
+    child.on('error',()=>this.fail(child,new Error('NATIVE_OCR_START')));
+    child.on('close',()=>this.fail(child,new Error('NATIVE_OCR_EXIT')));
+    return child;
+  }
+  async recognize(bitmap,size) {
+    if(this.closed)throw new Error('NATIVE_OCR_CLOSED');
+    if(this.pending)throw new Error('NATIVE_OCR_BUSY');
+    if(!Buffer.isBuffer(bitmap)||![size?.width,size?.height].every(n=>Number.isInteger(n)&&n>0&&n<=2200)||bitmap.length!==size.width*size.height*4)throw new Error('NATIVE_OCR_BITMAP');
+    if(this.now()<this.retryAt)throw new Error('NATIVE_OCR_COOLDOWN');
+    let child;try{child=this.launch();}catch{this.retryAt=this.now()+this.retryMs;throw new Error('NATIVE_OCR_START');}
+    const id=++this.nextId;
+    return new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>this.fail(child,new Error('NATIVE_OCR_TIMEOUT')),this.timeoutMs);
+      this.pending={id,resolve,reject,timer};
+      const header=JSON.stringify({id,width:size.width,height:size.height,byteLength:bitmap.length})+'\n';
+      try{child.stdin.write(header);child.stdin.write(bitmap);}catch{this.fail(child,new Error('NATIVE_OCR_PIPE'));}
+    });
+  }
+  async close() {
+    if(this.closed)return;
+    this.closed=true;
+    if(this.child){
+      const child=this.child;
+      await new Promise(resolve=>{
+        const timer=setTimeout(resolve,1000);
+        child.once('close',()=>{clearTimeout(timer);resolve();});
+        this.fail(child,new Error('NATIVE_OCR_CLOSED'));
+      });
+    }
+  }
+}
+
 class OcrReader {
-  constructor(cacheDir, onProgress = () => {}, bitmapFactory = null) { this.cacheDir = cacheDir; this.onProgress = onProgress; this.bitmapFactory = bitmapFactory; this.worker = null; this.busy = false; }
+  constructor(cacheDir, onProgress = () => {}, bitmapFactory = null, options = {}) {
+    this.cacheDir = cacheDir; this.onProgress = onProgress; this.bitmapFactory = bitmapFactory;
+    this.worker = null; this.nativeWorker = options.nativeWorker || null; this.busy = false;this.closed=false;
+    this.abortController=new AbortController();
+  }
   async init() {
+    if(this.closed)throw new Error('识别已关闭');
     if (!this.worker) {
       const models = path.join(this.cacheDir, 'lstm-v1');
       await fs.mkdir(models, { recursive: true });
@@ -35,7 +112,7 @@ class OcrReader {
         try { if ((await fs.stat(filename)).size > 100000) continue; } catch { /* First use. */ }
         this.onProgress(`首次使用：下载${language === 'chi_sim' ? '中文' : '英文'}识别模型…`);
         const url = `https://cdn.jsdelivr.net/npm/@tesseract.js-data/${language}/4.0.0_best_int/${language}.traineddata.gz`;
-        const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
+        const response = await fetch(url, { signal: AbortSignal.any([AbortSignal.timeout(30000),this.abortController.signal]) });
         if (!response.ok) throw new Error('识别模型暂不可用，请稍后重试');
         const compressed = Buffer.from(await response.arrayBuffer());
         if (compressed.length > 10 * 1024 * 1024) throw new Error('识别模型超过大小限制');
@@ -49,16 +126,18 @@ class OcrReader {
         logger: m => this.onProgress(m.status === 'recognizing text' ? '正在识别符文名称…' : '正在初始化本地文字识别…'),
         errorHandler: () => {},
       });
+      if(this.closed){await this.worker.terminate();this.worker=null;throw new Error('识别已关闭');}
       await this.worker.setParameters({ tessedit_pageseg_mode: '11', preserve_interword_spaces: '1' });
     }
     return this.worker;
   }
-  async read(image, region, augments) {
+  async read(image, region, augments, {allowSmall=false,allowFallback=true}={}) {
+    if(this.closed)throw new Error('识别已关闭');
     if (this.busy) throw new Error('识别正在进行，请稍候');
-    this.busy = true;
+    this.busy = true;const started=performance.now(),capturedAt=new Date().toISOString();
     try {
       const size = image.getSize();
-      if (size.width < 400 || size.height < 250) throw new Error('游戏画面尺寸过小，请使用无边框或窗口模式');
+      if (size.width < (allowSmall?32:400) || size.height < (allowSmall?16:250)) throw new Error('识别区域尺寸过小');
       const rect = { x: Math.floor(size.width * region.x), y: Math.floor(size.height * region.y),
         width: Math.floor(size.width * region.width), height: Math.floor(size.height * region.height) };
       let cropped = image.crop(rect);
@@ -70,21 +149,24 @@ class OcrReader {
       if (ratio !== 1) {
         cropped = cropped.resize({ width: Math.round(cropSize.width * ratio), height: Math.round(cropSize.height * ratio) });
       }
+      const cropMs=performance.now()-started;
       if (process.platform === 'win32') {
         this.onProgress('正在使用 Windows 中文识别…');
-        const filename = path.join(this.cacheDir, randomUUID() + '.png');
         try {
-          await fs.mkdir(this.cacheDir, { recursive: true });
-          await fs.writeFile(filename, cropped.toPNG());
-          const { stdout } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.resolve(__dirname, '../native/ocr.ps1'), '-ImagePath', filename], { windowsHide: true, timeout: 15000, maxBuffer: 256000 });
-          const data = JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
+          this.nativeWorker??=new WindowsOcrWorker();
+          const nativeStart=performance.now();
+          const data=await this.nativeWorker.recognize(cropped.toBitmap(),cropped.getSize());
           return { text: data.text.slice(0, 5000), matches: matchAugments(data.text, augments), engine: 'windows',
             lines: normalizeOcrLines(data.lines, rect, cropped.getSize(), size), sourceSize: size,
-            engineConfidence: null, capturedAt: new Date().toISOString() };
+            engineConfidence: null, capturedAt,
+            timings:{cropMs:Math.round(cropMs),nativeMs:Math.round(performance.now()-nativeStart),engineMs:data.recognitionMs??null,totalMs:Math.round(performance.now()-started),workerStarts:this.nativeWorker.starts??null} };
         } catch {
+          if(this.closed)throw new Error('识别已关闭');
+          if(!allowFallback)throw new Error('Windows 中文识别暂不可用；轻量模式等待恢复');
           this.onProgress('Windows 中文识别不可用，尝试备用识别模型…');
-        } finally { await fs.unlink(filename).catch(() => {}); }
+        }
       }
+      if(!allowFallback)throw new Error('轻量模式需要 Windows 中文识别');
       // Game cards usually have light text on dark backgrounds. Normalize polarity
       // and contrast before OCR; nativeImage uses BGRA on this Windows target.
       if (this.bitmapFactory) {
@@ -105,9 +187,10 @@ class OcrReader {
       const lines = (data.blocks || []).flatMap(block => (block.paragraphs || []).flatMap(paragraph => paragraph.lines || []));
       return { text: data.text.slice(0, 5000), matches: matchAugments(data.text, augments),
         lines: normalizeOcrLines(lines, rect, cropped.getSize(), size), sourceSize: size,
-        engine: 'tesseract', engineConfidence: Math.round(data.confidence), capturedAt: new Date().toISOString() };
+        engine: 'tesseract', engineConfidence: Math.round(data.confidence), capturedAt,
+        timings:{cropMs:Math.round(cropMs),totalMs:Math.round(performance.now()-started)} };
     } finally { this.busy = false; }
   }
-  async close() { if (this.worker) await this.worker.terminate(); this.worker = null; }
+  async close() { this.closed=true;this.abortController.abort();await this.nativeWorker?.close();if (this.worker) await this.worker.terminate(); this.worker = null; }
 }
-module.exports = { OcrReader, normalizeOcrLines };
+module.exports = { OcrReader, WindowsOcrWorker, normalizeOcrLines };

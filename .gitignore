@@ -4,3 +4,6 @@ dist/
 .qa/
 *.log
 *.traineddata
+.env
+.env.*
+!.env.example

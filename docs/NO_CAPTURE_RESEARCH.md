@@ -1,12 +1,16 @@
 # v0.2.2：无画面采集路线与证据
 
-调研日期：2026-11-02。目标环境：Windows、腾讯国服、现有 Electron 45 项目。本文区分已实现、实际观察和候选方案；[v0.2.1 视觉方案](RESEARCH.md) 是历史记录。
+初次调研：2026-11-02；最新更新：2026-11-03。目标环境：Windows、腾讯国服、现有 Electron 45 项目。本文区分已实现、实际观察和候选方案；[v0.2.1 视觉方案](RESEARCH.md) 是历史记录。
+
+**本轮更新：** [Overwolf 国服事件实验](OVERWOLF_EXPERIMENT.md) 已从官方源安装并实际后台运行 OW-Electron 44.9.0，约 45 秒正常退出；运行时启动成功，但在未配置开发凭据的环境中没有收到 GEP ready，也未进入 LoL 检测或收到海克斯事件。当前结论是授权条件尚未满足、国服兼容性未验证，不能判定国服不兼容。该隔离实验没有替换默认 Hexthon。
+
+另外已实现显式 `--visual-light-experimental` 的 targeted GDI/reroll 门控/标题 ROI/常驻 OCR 路径，离线测试和未验证范围见 [视觉性能审查与当前进展](OCR_PERFORMANCE.md)。它仍使用局部截图，不属于本文的无画面采集方案；默认 API 模式不采集，也不因事件路线受阻而自动回退到视觉。下文保留本地接口和无截图路线的历史调研依据。
 
 ## 当前实现
 
-默认启动采用接口模式。旧版画面采集运行已停止；新模式只创建一个默认隐藏的自绘控制面板，使用 LCU / Live Client Data 自动跟随英雄、己方阵容和装备。每轮读取完成后等待 3 秒再查询，不启动 `desktopCapturer` 取图、OCR、HUD 图标模板匹配、原生窗口观察进程或游戏浮层。视觉实现仅保留在显式开发实验参数 `--visual-experimental` 后，不是失败回退方案。
+默认启动采用接口模式。旧版画面采集运行已停止；新模式只创建一个默认隐藏的自绘控制面板，使用 LCU / Live Client Data 自动跟随英雄、己方阵容和装备。每轮读取完成后等待 3 秒再查询，不启动 `desktopCapturer` 取图、GDI 取图、OCR、HUD 图标模板匹配、原生窗口观察进程或游戏浮层。旧视觉入口 `--visual-experimental` 与新增轻量入口 `--visual-light-experimental` 都是显式开发实验参数，不是失败回退方案。
 
-目前缺少可靠的三选一、完整已选海克斯、剩余刷新次数、商店开关和卡片位置，因此默认模式不显示商店或海克斯浮层。控制面板仍可查询 OP.GG 资料和已知上下文的规则分。本次没有安装 Overwolf、游戏插件或驱动，也没有接入新的外部事件 SDK。
+目前默认接口模式缺少可靠的三选一、完整已选海克斯、剩余刷新次数、商店开关和卡片位置，因此不显示商店或海克斯浮层。控制面板仍可查询 OP.GG 资料和已知上下文的规则分。初稿时尚未安装 Overwolf SDK；本轮后续已完成独立运行时实验，但尚未接通 GEP 事件，不能将该探针描述为已投入使用的国服数据源。
 
 删除画面识别的默认运行路径，能够避免原有截图、缩放、OCR 和图标比较工作；这是一项实现事实，不是 FPS 改善比例。Electron、本地接口请求和客户端发现仍有成本，本轮没有可用于量化流畅度变化的对照帧时间测试。
 
@@ -32,7 +36,7 @@ Riot 文档区分客户端 LCU 与实际对局中的 Game Client API。Live Clie
 | [Sygnano/aram-mayhem-tracker 的装备页代码](https://github.com/Sygnano/aram-mayhem-tracker/blob/main/apps/desktop/src-tauri/src/engine/itemsets.rs) | 通过 LCU 装备页结构把推荐呈现在游戏原生商店 | 可绕开“先检测商店是否打开，再显示外部窗口”的需求；本项目仅完成数据生成与合并 |
 | [zp96-cmd/mayhem-overlay 的数据来源说明](https://github.com/zp96-cmd/mayhem-overlay#data-sources-all-local--community--no-riot-api-key-needed) | 状态走 LCU / Live Client，三选一仍走截图裁剪与 Tesseract | 同类开源产品并非普遍已有无需图像的完整三选一方案 |
 
-上述项目的统计来源不相同。本项目继续使用 OP.GG，不将其他项目的 ARAMKit / aramgg 胜率或数据宣称为 OP.GG 数据。没有复制参考项目的业务源码。
+上述项目的统计来源不相同。本项目继续使用 OP.GG，不将其他项目的 ARAMKit / aramgg 胜率或数据宣称为 OP.GG 数据。这里的本地接口解析和装备页数据生成采用独立实现；后续轻量视觉实验已按 MIT 保留归属，适配 Sygnano 的部分采集、布局和识别模块，详见 [视觉性能文档](OCR_PERFORMANCE.md)。
 
 ### 原生装备页的准备状态
 
@@ -56,10 +60,10 @@ LoL 文档未列出商店开关；`panel_location` 的说明是计分板位置�
 
 - OW-Electron 是 Electron 的分支，应用独立运行，不依赖经典 Overwolf Client；同时，现有标准 Electron 45 项目不能假定只添加一个普通 npm 模块即可获得 GEP，需验证其支持版本、包和游戏启用条件。[框架对比](https://dev.overwolf.com/ow-electron/getting-started/onboarding-resources/frameworks-overview/)
 - 使用 API 要求应用提案获得白名单；公开发布有 QA 和可信 CA 签名要求，未签名分发版不能加载 GEP 等游戏包。自 2026-11-01 起，官方仅审批使用 Overwolf 广告或 Tebex 商业化的应用。[发布要求](https://dev.overwolf.com/ow-electron/getting-started/release-your-app/)
-- 本项目尚未完成上述接入步骤，未安装运行时，也未测量国服事件完整性与对局性能。官方能力说明不替代实际集成验证。
+- 初次调研时尚未安装运行时；本轮后续已启动官方 OW-Electron 44.9.0 隔离探针，但缺少开发凭据且没有收到 GEP ready。尚未完成 GEP 接入、国服事件完整性或对局性能验证。结果及授权边界见 [本轮 Overwolf 实测](OVERWOLF_EXPERIMENT.md)；官方能力说明不替代实际集成验证。
 
 ## 后续验证的边界
 
-本轮默认方案优先保留可验证的本地数据读取，缺少实时字段时保持未知。不会把等级触发时机、快捷键、装备变更或空数组解释为已确认的选卡／商店事件。用户未要求恢复视觉方案时，不重新开启画面采集。
+本轮默认方案优先保留可验证的本地数据读取，缺少实时字段时保持未知。不会把等级触发时机、快捷键、装备变更或空数组解释为已确认的选卡／商店事件。轻量视觉适配与离线测试不改变默认无采集行为；启动参数以外的设置、重连或 GEP 不可用都不会自动启用它。
 
 在可用事件来源得到确认前，完整无截图海克斯浮层仍未完成。原生装备页可作为出装展示的下一步，但其实际写入与游戏呈现应独立验证，不能与海克斯识别混为一项已实现能力。

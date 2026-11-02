@@ -1,0 +1,14 @@
+{
+  "name": "hexthon-gep-probe",
+  "productName": "Hexthon GEP Probe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isolated background diagnostic for official Overwolf LoL events",
+  "author": { "name": "Sskift" },
+  "main": "main.cjs",
+  "overwolf": { "packages": ["gep"] },
+  "devDependencies": {
+    "@overwolf/ow-electron": "44.9.0",
+    "@overwolf/ow-electron-packages-types": "1.1.14"
+  }
+}

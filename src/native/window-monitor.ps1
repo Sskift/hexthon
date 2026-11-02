@@ -26,11 +26,12 @@ public static class HexthonWindowReader {
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out Rect rect, int size);
 
     public sealed class Bounds { public int x, y, width, height; }
     public sealed class WindowInfo {
-        public string hwnd; public int pid, x, y, width, height;
+        public string hwnd; public int pid, x, y, width, height, dpi;
         public bool visible, minimized, foreground; public Bounds clientRect;
     }
     public sealed class CursorInfo { public int x, y; public bool active, leftDown, leftPressed; public long pressId; }
@@ -68,9 +69,12 @@ public static class HexthonWindowReader {
         uint pid; GetWindowThreadProcessId(hwnd, out pid);
         Rect client; Point origin = new Point(); Bounds content = null;
         if (GetClientRect(hwnd, out client) && ClientToScreen(hwnd, ref origin)) content = new Bounds { x=origin.X, y=origin.Y, width=client.Right-client.Left, height=client.Bottom-client.Top };
-        return new WindowInfo { hwnd=hwnd.ToInt64().ToString(), pid=(int)pid, x=rect.Left, y=rect.Top,
+        int dpi = 0; try { dpi = (int)GetDpiForWindow(hwnd); } catch { }
+        return new WindowInfo { hwnd=hwnd.ToInt64().ToString(), pid=(int)pid, x=rect.Left, y=rect.Top, dpi=dpi,
             width=Math.Max(0,rect.Right-rect.Left), height=Math.Max(0,rect.Bottom-rect.Top),
-            visible=IsWindowVisible(hwnd), minimized=IsIconic(hwnd), foreground=(hwnd==foreground || pid==foregroundPid), clientRect=content };
+            // Match the capture worker: another window owned by this process
+            // does not establish that this game window is still foreground.
+            visible=IsWindowVisible(hwnd), minimized=IsIconic(hwnd), foreground=(hwnd==foreground), clientRect=content };
     }
     static WindowInfo Best(List<IntPtr> windows, IntPtr foreground, uint foregroundPid) {
         WindowInfo best = null; long bestScore = -1;

@@ -19,11 +19,16 @@ Hexthon 未获得 Riot Games、腾讯或 OP.GG 的背书。
 
 ## 架构参考
 
+轻量视觉实验的按钮模板、布局常数及相关检测思路移植自 [Sygnano/aram-mayhem-tracker](https://github.com/Sygnano/aram-mayhem-tracker)，固定提交 `ecfa004fe855a2a5dfbb2c37b818039f5bc72bf1`，遵循 MIT。原版权及许可证保留在 `assets/vision/LICENSE-Sygnano.txt`，具体资产路径与改动见 `assets/vision/README.md`。游戏按钮图像本身的权利仍属于 Riot Games。本项目未引入该项目的 PaddleOCR 模型。
+
 以下项目仅用于参考公开架构与工作流，没有将其业务源码复制进本项目：
 
-- [Sygnano/aram-mayhem-tracker](https://github.com/Sygnano/aram-mayhem-tracker)
 - [CyberKird/aram-mayhem-helper](https://github.com/CyberKird/aram-mayhem-helper)
 - [zp96-cmd/mayhem-overlay](https://github.com/zp96-cmd/mayhem-overlay)
+
+## 独立 Overwolf 实验
+
+`experiments/overwolf-probe` 单独声明官方 `@overwolf/ow-electron` 与接口类型依赖，不进入 Hexthon 默认运行或打包目录。公开安装器、示例和类型的许可不等于 GEP 服务授权；官方运行时包含未开放的扩展服务，使用须遵循其开发授权要求。该目录没有修改官方运行时，也没有复制 GEP 提取引擎代码。详见 [官方 FAQ](https://dev.overwolf.com/ow-electron/getting-started/onboarding-resources/ow-electron-faq/) 与 [Dev Mode](https://dev.overwolf.com/ow-electron/guides/dev-tools/dev-mode/)。
 
 依赖许可保留在 `node_modules` 与打包应用的对应组件中。`.qa`、本机配置和诊断文件不是第三方素材，也不随源码或发行包分发。
 
