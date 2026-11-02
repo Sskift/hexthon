@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://opgg-static.akamaized.net data:; connect-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>Hexthon · 商店出装参考</title><link rel="stylesheet" href="shop.css">
+</head>
+<body>
+  <main class="shop-panel">
+    <header><span class="logo">H</span><div><h1>出装参考</h1><p>商店打开时显示</p></div><span class="context-tag">SHOP</span></header>
+    <section id="shop-hero" class="hero"></section>
+    <section class="build-section"><div class="section-label"><strong>核心装备路线</strong><span>OP.GG 顺序参考</span></div><div id="shop-items" class="item-list"></div></section>
+    <section class="inventory"><div class="section-label"><span>当前装备</span><span id="shop-inventory-status"></span></div><p id="shop-inventory"></p></section>
+    <p id="shop-augments" class="augments" hidden></p>
+    <footer><span id="shop-source">OP.GG</span><span id="shop-data-status">结合本局自行选择</span></footer>
+  </main>
+  <script src="shop.js"></script>
+</body>
+</html>

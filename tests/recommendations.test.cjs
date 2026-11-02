@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { draftFromSession, liveContext, LeagueReader } = require('../src/core/league.cjs');
-const { scoreAugments, rankDraft, buildRecommendations, rerollAdvice, bundledStatic } = require('../src/core/recommendations.cjs');
+const { scoreAugments, rankDraft, buildRecommendations, rerollAdvice, itemFeatures, bundledStatic } = require('../src/core/recommendations.cjs');
 const catalog = require('../data/seed/index.json');
 
 const findAugment = key => ({ ...catalog.augments.find(a => a.key === key), scope: 'champion' });
@@ -113,6 +113,39 @@ test('build guidance recognizes owned upgrades and distinguishes unknown invento
   assert.equal(known.items[0].owned, true); assert.equal(known.items[1].owned, false); assert.equal(known.next.id, 3031);
   const unknown = buildRecommendations({ builds })[0];
   assert.equal(unknown.itemsKnown, false); assert.equal(unknown.rows[0].next, null); assert.equal(unknown.rows[0].items[0].owned, null);
+});
+
+test('Poro snacks are separated from equipment for both regional ids and translated names', () => {
+  const active = { riotId: 'own#local' };
+  const items = [
+    { itemID: 2052, displayName: 'Poro-Snax' },
+    { itemID: 220013, displayName: '魄罗佳肴' },
+    { itemID: 999901, displayName: '魄 罗 佳 肴' },
+    { itemID: 3115, displayName: '纳什之牙' },
+  ];
+  const result = liveContext(active, [{ riotId: 'own#local', team: 'ORDER', items }], catalog.champions);
+  assert.deepEqual(result.ownItems.map(item => item.id), [3115]);
+  assert.deepEqual(result.ownUtilityItems.map(item => item.id), [2052, 220013, 999901]);
+  const absent = liveContext(active, [], catalog.champions);
+  assert.equal(absent.ownItems, null); assert.equal(absent.ownUtilityItems, null);
+  const empty = liveContext(active, [{ riotId: 'own#local', items: [items[1]] }], catalog.champions);
+  assert.deepEqual(empty.ownItems, []);
+  assert.deepEqual([...itemFeatures([2052, 220013, { id: 999901, name: '魄罗佳肴' }, 3115]).itemIds], [3115]);
+});
+
+test('Poro snacks cannot become a build row or next purchase while non-purchasable upgrades remain', () => {
+  const builds = [
+    { name: '出门装', rows: [[{ id: 2052, name: '魄罗佳肴' }, { id: 1052, name: '增幅典籍' }]] },
+    { name: '核心装备', rows: [[{ id: 220013, name: '魄罗佳肴' }, { id: 999901, name: '魄罗佳肴' }, { id: 999902, name: '升级装备' }]] },
+    { name: '无有效装备', rows: [[{ id: 2052 }]] },
+  ];
+  const staticData = { items: { 999902: { gold: { purchasable: false } } } };
+  const result = buildRecommendations({ builds, ownItems: [{ id: 220013 }], staticData });
+  assert.deepEqual(result.map(group => group.name), ['出门装', '核心装备']);
+  assert.deepEqual(result.map(group => group.rows[0].next.id), [1052, 999902]);
+  assert.deepEqual(result.flatMap(group => group.rows.flatMap(row => row.items.map(item => item.id))), [1052, 999902]);
+  const unknown = buildRecommendations({ builds, ownItems: null, staticData });
+  assert.ok(unknown.every(group => !group.itemsKnown && group.rows.every(row => row.next === null)));
 });
 
 test('reroll references same rarity only, and qualifies incomplete live context', () => {

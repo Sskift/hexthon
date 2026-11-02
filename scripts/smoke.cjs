@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const {locateOffer,OfferTracker}=require('../src/core/vision.cjs');
+const {detectShop}=require('../src/core/shop-vision.cjs');
 const {DEFAULTS}=require('../src/core/settings.cjs');
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function runSmoke({panel, overlay, cardWindows, state, ocr, recalculate, layout, publish}) {
@@ -41,7 +42,7 @@ async function runSmoke({panel, overlay, cardWindows, state, ocr, recalculate, l
   await run(`window.hexthon.setOffers(${JSON.stringify(state.augments.slice(0,3).map(a=>a.id))})`);
   await wait(100);
   await fs.writeFile(path.join(dir,'overlay.png'),(await overlay.webContents.capturePage()).toPNG());
-  assert.equal(await overlay.webContents.executeJavaScript('document.querySelectorAll(".row").length'),3);
+  assert.equal(await overlay.webContents.executeJavaScript('document.querySelectorAll(".shop-item").length'),3);
   const names=['术士果汁盒','魔法飞弹','循环往复'];
   let offer=locateOffer({capturedAt:'sample-1',lines:names.map((text,i)=>({text,x:.2+i*.25,y:.4,width:.1,height:.035}))},state.catalog.augments);
   if (process.argv.includes('--with-ocr')) {
@@ -53,6 +54,9 @@ async function runSmoke({panel, overlay, cardWindows, state, ocr, recalculate, l
     assert.deepEqual(result.matches.filter(x=>x.exact).map(x=>x.name).sort(),['术士果汁盒','魔法飞弹','循环往复'].sort());
     offer=locateOffer(result,state.catalog.augments);assert.equal(offer.cards.length,3,'OCR title geometry locates three cards');
     console.log('Local Chinese OCR: 3/3 synthetic names recognized (not an in-game test)');
+    const shopUrl=await run(`(()=>{const c=document.createElement('canvas');c.width=1920;c.height=1080;const x=c.getContext('2d');x.fillStyle='#101a25';x.fillRect(0,0,1920,1080);x.fillStyle='white';x.font='36px Microsoft YaHei';x.fillText('推荐',400,260);x.fillText('所有物品',620,260);x.fillText('撤销',430,780);x.fillText('购买',1250,780);return c.toDataURL('image/png');})()`);
+    const shopOcr=await ocr.read(require('electron').nativeImage.createFromDataURL(shopUrl),{x:.08,y:.08,width:.84,height:.84},state.catalog.augments);
+    assert.equal(detectShop(shopOcr).visible,true,'Native Chinese OCR must locate independent shop controls');
     await ocr.close();
   }
   // Hidden fixtures exercise the automatic pipeline without sending system input.
@@ -62,10 +66,11 @@ async function runSmoke({panel, overlay, cardWindows, state, ocr, recalculate, l
   state.game={phase:'InProgress',lcuConnected:true,liveConnected:true,isMayhem:true,championId:103,
     ownItems:[{id:3089,name:'灭世者的死亡之帽'},{id:3115,name:'纳什之牙'}],team:[],availableChampionIds:[103]};
   state.monitor={game:{hwnd:'1',x:100,y:100,width:1920,height:1080,foreground:true,visible:true,minimized:false},client:null};
-  state.offer=tracked;state.offeredIds=tracked.cards.map(c=>c.id);
+  state.offer={...tracked,present:true};state.offeredIds=tracked.cards.map(c=>c.id);
   const chosen=state.catalog.augments.find(a=>a.key==='EtherealWeapon')||state.augments[0];
   state.selectedAugments=[{id:chosen.id,confidence:'inferred',name:chosen.name}];
   recalculate();layout();publish();await wait(200);
+  assert.equal(state.overlayMode,'cards');
   for(let i=0;i<3;i++){
     const w=cardWindows[i];assert.equal(await w.webContents.executeJavaScript('document.getElementById("card-hint").hidden'),false);
     assert.notEqual(await w.webContents.executeJavaScript('document.getElementById("card-score").textContent'),'—');
@@ -73,6 +78,15 @@ async function runSmoke({panel, overlay, cardWindows, state, ocr, recalculate, l
     await fs.writeFile(path.join(dir,`card-${i+1}.png`),(await w.webContents.capturePage()).toPNG());
   }
   await fs.writeFile(path.join(dir,'overlay.png'),(await overlay.webContents.capturePage()).toPNG());
+  state.offer={cards:[],stable:false,present:false};state.shop={visible:false};layout();
+  assert.equal(state.overlayVisible,false,'Ordinary gameplay must have no overlay');
+  await run('window.hexthon.toggleOverlay()');assert.equal(state.overlayVisible,false);
+  await run('window.hexthon.toggleOverlay()');assert.equal(state.overlayVisible,false,'Hotkey cannot force a corner overlay');
+  state.shop={visible:true,rect:{x:.2,y:.15,width:.48,height:.57}};layout();publish();await wait(100);
+  assert.equal(state.overlayMode,'shop');
+  assert.equal(await overlay.webContents.executeJavaScript('document.querySelectorAll(".shop-item").length'),3);
+  await fs.writeFile(path.join(dir,'shop.png'),(await overlay.webContents.capturePage()).toPNG());
+  state.shop={visible:false};layout();assert.equal(state.overlayMode,null,'Closing shop hides recommendations');
   const picked=offer.cards[1],rect=picked.selectionRect;
   tracker.observe({...offer,observedAt:'sample-2'},{active:true,x:rect.x+rect.width/2,y:rect.y+rect.height/2,leftPressed:true,pressId:1});
   now=1800;tracker.observe({cards:[],observedAt:'empty-1'},{active:true});
@@ -82,12 +96,12 @@ async function runSmoke({panel, overlay, cardWindows, state, ocr, recalculate, l
     team:[{championId:103,isSelf:true},{championId:22},{championId:51},{championId:238},{championId:11}],bench:[54,117],availableChampionIds:[103,54,117]};
   state.monitor={game:null,client:{x:0,y:0,width:1920,height:1080,foreground:true,visible:true,minimized:false}};
   state.offer={cards:[],stable:false};state.offeredIds=[];state.selectedAugments=[];recalculate();layout();publish();await wait(200);
+  assert.equal(state.overlayVisible,false,'No automatic upper-right companion during champion select');
   assert.equal(await run('document.getElementById("tab-draft").hidden'),false);
   assert.deepEqual(state.draft.candidates.map(c=>c.championId).sort((a,b)=>a-b),[54,103,117]);
   assert.ok(state.draft.candidates.every(c=>c.winRate===null));
   assert.equal(state.buildSuggestions[0].itemsKnown,false);
   await fs.writeFile(path.join(dir,'draft.png'),(await panel.webContents.capturePage()).toPNG());
-  await fs.writeFile(path.join(dir,'draft-overlay.png'),(await overlay.webContents.capturePage()).toPNG());
   state.monitor.client.foreground=false;layout();assert.equal(state.overlayVisible,false,'Switching away hides automatic overlays');
   for(const w of cardWindows)assert.equal(w.isVisible(),false);
   assert.equal(panel.isVisible(),false);assert.equal(overlay.isVisible(),false);

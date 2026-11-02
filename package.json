@@ -1,6 +1,6 @@
 {
   "name": "hexthon",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "国服海克斯大乱斗外置助手 · OP.GG 资料与本地只读对局信息",
   "private": true,
   "main": "src/main.cjs",

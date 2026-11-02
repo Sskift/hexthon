@@ -1,4 +1,5 @@
 const bundledStatic = require('../../data/static/riot.json');
+const { isPoroSnack } = require('./league.cjs');
 const TIER_SCORE = [84, 76, 67, 58, 49, 40];
 const INDEX_LABEL = '规则匹配指数（非胜率）';
 const clamp = n => Math.max(0, Math.min(100, Math.round(n)));
@@ -9,8 +10,9 @@ function itemFeatures(ownItems, staticData = bundledStatic) {
   const features = { known: Array.isArray(ownItems), ap: 0, ad: 0, crit: 0, attackSpeed: 0, health: 0, mana: 0, onHit: false, healing: false, itemIds: new Set(), names: [] };
   for (const item of list(ownItems).filter(item => item !== null && item !== undefined)) {
     const id = Number(typeof item === 'number' ? item : item.id ?? item.itemID);
-    features.itemIds.add(id);
     const meta = staticData.items?.[id] || {};
+    if (isPoroSnack(item, meta.name)) continue;
+    features.itemIds.add(id);
     const stats = meta.stats || item.stats || {};
     features.names.push(meta.name || item.name || '');
     const count = Number(item.count) > 0 ? Number(item.count) : 1;
@@ -152,7 +154,7 @@ function rankDraft({ catalog, team = [], availableChampionIds = [], selfId = nul
 }
 
 function buildRecommendations({ builds = [], ownItems = null, staticData = bundledStatic } = {}) {
-  const owned = new Set(list(ownItems).filter(i => i !== null && i !== undefined).map(i => Number(typeof i === 'number' ? i : i.id ?? i.itemID)));
+  const owned = new Set(list(ownItems).filter(i => i !== null && i !== undefined && !isPoroSnack(i)).map(i => Number(typeof i === 'number' ? i : i.id ?? i.itemID)));
   const ownsOrUpgrade = id => {
     if (owned.has(id)) return true;
     const visited = new Set(), queue = [...(staticData.items?.[id]?.into || [])];
@@ -160,9 +162,9 @@ function buildRecommendations({ builds = [], ownItems = null, staticData = bundl
     return false;
   };
   return builds.map(group => ({ name: group.name, itemsKnown: Array.isArray(ownItems), rows: group.rows.map(items => {
-    const annotated = items.map(item => ({ ...item, owned: Array.isArray(ownItems) ? ownsOrUpgrade(item.id) : null }));
+    const annotated = items.filter(item => !isPoroSnack(item, staticData.items?.[item.id]?.name)).map(item => ({ ...item, owned: Array.isArray(ownItems) ? ownsOrUpgrade(item.id) : null }));
     return { items: annotated, next: Array.isArray(ownItems) ? annotated.find(i => !i.owned) || null : null };
-  }) }));
+  }).filter(row => row.items.length) })).filter(group => group.rows.length);
 }
 
 function rerollAdvice({ offeredIds = [], scores = [], augments = [], rerollsRemaining = null, selectedKnown = false } = {}) {

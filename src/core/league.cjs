@@ -66,6 +66,11 @@ function championFromSelect(session) {
   return session?.myTeam?.find(p => p.cellId === session.localPlayerCellId)?.championId || null;
 }
 function normalizeName(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]/g, ''); }
+function isPoroSnack(item, fallbackName = '') {
+  const id = Number(typeof item === 'number' ? item : item?.id ?? item?.itemID);
+  const name = normalizeName(item?.name || item?.displayName || fallbackName);
+  return id === 2052 || id === 220013 || name === '魄罗佳肴' || /^poro(?:snax|snacks?)$/.test(name);
+}
 function activePlayerFromLive(active, players) {
   return (players || []).find(p => (active?.riotId && p.riotId === active.riotId) || (active?.summonerName && p.summonerName === active.summonerName)) || null;
 }
@@ -90,12 +95,14 @@ function draftFromSession(session) {
 }
 function liveContext(active, players, champions) {
   const own = activePlayerFromLive(active, players);
+  const inventory = own && Array.isArray(own.items) ? own.items.filter(item => Number(item.itemID) > 0).map(item => ({ id: Number(item.itemID), name: String(item.displayName || ''), count: Number(item.count) || 1 })) : null;
   const stats = {};
   for (const key of ['abilityPower', 'attackDamage', 'attackSpeed', 'attackRange', 'critChance', 'maxHealth', 'armor', 'magicResist', 'resourceMax', 'abilityHaste']) {
     const value = active?.championStats?.[key]; if (typeof value === 'number' && Number.isFinite(value)) stats[key] = value;
   }
   if (typeof active?.championStats?.resourceType === 'string') stats.resourceType = active.championStats.resourceType;
-  return { ownItems: own && Array.isArray(own.items) ? own.items.filter(item => Number(item.itemID) > 0).map(item => ({ id: Number(item.itemID), name: String(item.displayName || ''), count: Number(item.count) || 1 })) : null,
+  return { ownItems: inventory?.filter(item => !isPoroSnack(item)) ?? null,
+    ownUtilityItems: inventory?.filter(item => isPoroSnack(item)) ?? null,
     ownChampStats: Object.keys(stats).length ? stats : null,
     ownSelectedAugmentIds: null, selectedAugmentsSource: 'unavailable',
     team: own ? players.filter(p => p.team === own.team).map((p, i) => ({ championId: championIdFromPlayer(p, champions), cellId: i, isSelf: p === own })) : [],
@@ -110,7 +117,7 @@ class LeagueReader {
       this.connection = await this.discover(settings.leaguePath);
     }
     let phase = 'Disconnected', session = null, championId = null, lcuConnected = false;
-    let draft = draftFromSession(null), context = { ownItems: null, ownChampStats: null, ownSelectedAugmentIds: null, selectedAugmentsSource: 'unavailable' };
+    let draft = draftFromSession(null), context = { ownItems: null, ownUtilityItems: null, ownChampStats: null, ownSelectedAugmentIds: null, selectedAugmentsSource: 'unavailable' };
     if (this.connection) {
       try {
         phase = await this.get('/lol-gameflow/v1/gameflow-phase', this.connection);
@@ -140,4 +147,4 @@ class LeagueReader {
       gameId: session?.gameData?.gameId || null, checkedAt: new Date().toISOString() };
   }
 }
-module.exports = { parseLockfile, parseCommandLine, discoverConnection, localGet, isMayhem, championFromSelect, championFromLive, draftFromSession, liveContext, LeagueReader };
+module.exports = { parseLockfile, parseCommandLine, discoverConnection, localGet, isMayhem, championFromSelect, championFromLive, draftFromSession, liveContext, LeagueReader, isPoroSnack };

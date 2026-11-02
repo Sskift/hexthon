@@ -6,9 +6,11 @@ const { LeagueReader } = require('./core/league.cjs');
 const { OcrReader } = require('./core/ocr.cjs');
 const { WindowMonitor } = require('./core/window-monitor.cjs');
 const { locateOffer, OfferTracker } = require('./core/vision.cjs');
+const { detectShop, ShopTracker } = require('./core/shop-vision.cjs');
+const {prepareTemplates,matchAugmentIcons,AugmentIconTracker}=require('./core/augment-icons.cjs');
 const { scoreAugments, rankDraft, buildRecommendations, rerollAdvice } = require('./core/recommendations.cjs');
-const { DEFAULTS, validateSettings, overlayBounds } = require('./core/settings.cjs');
-const { cardBounds, companionBounds } = require('./core/overlay-layout.cjs');
+const { DEFAULTS, validateSettings } = require('./core/settings.cjs');
+const { cardBounds, shopBounds } = require('./core/overlay-layout.cjs');
 
 const smoke = process.argv.includes('--smoke-test');
 app.setName('Hexthon');
@@ -16,14 +18,17 @@ if (smoke) app.setPath('userData', path.resolve(__dirname, '../.qa/profile'));
 let panel, overlay, tray, provider, reader, ocr, monitor, staticData = {}, quitting = false;
 let gameTimer, scanTimer, viewTimer, statusTimer, manualOverlay = null, loadSerial = 0, captureBusy = false, gameEpoch = 0;
 let lastOffer = null, tracker = new OfferTracker(), inferredMode = false, captureAt = 0, trackingSignature = '';
+const shopTracker=new ShopTracker({observationTtlMs:5000});
+const iconTracker=new AugmentIconTracker(),ignoredVisualSelections=new Set();
+let iconTemplates=[];
 let lastLiveTime = null, liveLostAt = 0;
 const consumedSelections = new Set();
 const cardWindows = [];
 let settings = { ...DEFAULTS };
-const state = { version:'0.2.0', catalog:null, selectedChampion:null, augments:[], builds:[],
+const state = { version:'0.2.1', catalog:null, selectedChampion:null, augments:[], builds:[],
   augmentMeta:null, buildMeta:null, game:{phase:'Disconnected',lcuConnected:false,liveConnected:false,team:[],bench:[],ownItems:null},
   offeredIds:[], selectedAugments:[], augmentScores:[], reroll:null, draft:null, buildSuggestions:[],
-  offer:{cards:[],stable:false}, selectionHistoryComplete:false, monitor:{game:null,client:null}, autoStatus:'正在寻找英雄联盟窗口…',
+  offer:{cards:[],stable:false,present:false}, shop:{visible:false}, visualSelection:{matches:[],pending:[]}, overlayMode:null, selectionHistoryComplete:false, monitor:{game:null,client:null}, autoStatus:'正在寻找英雄联盟窗口…',
   ocr:{status:'idle',matches:[],text:''}, overlayVisible:false, loading:false, error:'', shortcuts:{},
   modeConfirmed:false, displays:[], imageAssets:{} };
 const settingsFile = () => path.join(app.getPath('userData'),'settings.json');
@@ -48,7 +53,7 @@ function recalculate() {
 }
 async function saveSettings(patch) {
   const oldPath=settings.leaguePath;
-  settings={...validateSettings(patch,settings),schemaVersion:2};
+  settings={...validateSettings(patch,settings),schemaVersion:3};
   await fs.mkdir(app.getPath('userData'),{recursive:true});
   await fs.writeFile(settingsFile()+'.tmp',JSON.stringify(settings,null,2));
   await fs.rename(settingsFile()+'.tmp',settingsFile());
@@ -74,17 +79,16 @@ function applyBounds(win,bounds) {
 function activeMayhem() { return state.game.isMayhem||state.modeConfirmed||inferredMode; }
 function layout() {
   if(!overlay)return;
-  const w=state.game.phase==='ChampSelect'?state.monitor.client:state.monitor.game;
-  const active=['ChampSelect','InProgress','GameStart','Reconnect'].includes(state.game.phase);
-  const visible=manualOverlay??(settings.autoOverlay&&active&&activeMayhem()&&w?.foreground&&w?.visible&&!w?.minimized);
-  let bounds=companionBounds(nativeRect(w),state.game.phase);
-  if(!bounds){ const d=screen.getAllDisplays().find(d=>d.id===settings.displayId)||screen.getPrimaryDisplay();bounds=overlayBounds(d.workArea,settings.anchor); }
-  applyBounds(overlay,bounds);if(overlay.getOpacity()!==settings.opacity)overlay.setOpacity(settings.opacity);
-  // Hide the large companion while the card annotations are present.
-  const cardRects=state.offer.cards.map(card=>cardBounds(nativeRect(state.monitor.game),card));
-  const showCards=Boolean(settings.autoOverlay&&state.game.phase==='InProgress'&&state.offer.stable&&cardRects.length===3&&cardRects.every(Boolean)&&state.monitor.game?.foreground&&state.monitor.game?.visible&&!state.monitor.game?.minimized&&activeMayhem()&&manualOverlay!==false);
-  if(visible&&!showCards&&!smoke){if(!overlay.isVisible())overlay.showInactive();}else if(overlay.isVisible())overlay.hide();
-  state.overlayVisible=Boolean(visible||showCards);
+  const w=state.monitor.game,gameRect=nativeRect(w);
+  state.overlayEnabled=settings.autoOverlay&&manualOverlay!==false;
+  const eligible=Boolean(state.overlayEnabled&&state.game.phase==='InProgress'&&activeMayhem()&&w?.foreground&&w?.visible&&!w?.minimized);
+  const cardRects=state.offer.cards.map(card=>cardBounds(gameRect,card));
+  const showCards=Boolean(eligible&&state.offer.present&&state.offer.stable&&cardRects.length===3&&cardRects.every(Boolean));
+  const bounds=state.shop.visible?shopBounds(gameRect,state.shop):null;
+  const showShop=Boolean(eligible&&bounds&&!showCards&&!state.offer.present);
+  if(bounds)applyBounds(overlay,bounds);if(overlay.getOpacity()!==settings.opacity)overlay.setOpacity(settings.opacity);
+  if(showShop&&!smoke){if(!overlay.isVisible())overlay.showInactive();}else if(overlay.isVisible())overlay.hide();
+  state.overlayVisible=showShop||showCards;state.overlayMode=showCards?'cards':showShop?'shop':null;
   for(let i=0;i<cardWindows.length;i++){
     const rect=showCards?cardRects[i]:null;
     if(rect)applyBounds(cardWindows[i],rect);
@@ -92,7 +96,7 @@ function layout() {
     if(rect&&!smoke){if(!cardWindows[i].isVisible())cardWindows[i].showInactive();}else if(cardWindows[i].isVisible())cardWindows[i].hide();
   }
 }
-function toggleOverlay(){manualOverlay=!state.overlayVisible;layout();publish();}
+function toggleOverlay(){manualOverlay=manualOverlay===false?null:false;layout();publish();}
 function updateDisplays(){state.displays=screen.getAllDisplays().map((d,i)=>({id:d.id,label:`显示器 ${i+1} · ${d.size.width} × ${d.size.height}`,primary:d.id===screen.getPrimaryDisplay().id}));layout();publish();}
 async function loadChampion(key,force=false){
   const c=state.catalog?.champions.find(c=>c.key===key);if(!c)return;
@@ -110,7 +114,8 @@ async function loadChampion(key,force=false){
 function resetGame(){
   gameEpoch++;tracker.reset();lastOffer=null;inferredMode=false;manualOverlay=null;trackingSignature='';
   consumedSelections.clear();
-  state.offeredIds=[];state.selectedAugments=[];state.offer={cards:[],stable:false};state.modeConfirmed=false;
+  iconTracker.reset();ignoredVisualSelections.clear();state.visualSelection={matches:[],pending:[]};
+  state.offeredIds=[];state.selectedAugments=[];state.offer={cards:[],stable:false,present:false};state.shop=shopTracker.invalidate();state.modeConfirmed=false;
   state.selectionHistoryComplete=false;lastLiveTime=null;liveLostAt=0;
   state.ocr={status:'idle',matches:[],text:''};
 }
@@ -122,7 +127,7 @@ function consumeTracking(result){
   if(!result)return;
   const signature=JSON.stringify(result);
   if(signature===trackingSignature)return;trackingSignature=signature;
-  state.offer={cards:result.cards||[],stable:Boolean(result.stable),pendingSelection:result.pendingSelection||null};
+  state.offer={cards:result.cards||[],stable:Boolean(result.stable),present:lastOffer?.cards?.length===3,pendingSelection:result.pendingSelection||null};
   state.offeredIds=state.offer.stable?state.offer.cards.map(c=>c.id):[];
   const selections=Array.isArray(result.selected)?result.selected:result.selected?[result.selected]:[];
   for(const pick of selections){
@@ -137,7 +142,9 @@ function consumeTracking(result){
   recalculate();layout();publish();
 }
 function onWindowUpdate(snapshot){
+  const lostForeground=state.monitor.game?.foreground&&!snapshot.game?.foreground;
   state.monitor=snapshot;
+  if(lostForeground){state.shop=shopTracker.invalidate();iconTracker.invalidate();lastOffer=null;consumeTracking(tracker.invalidate());}
   if(!state.game.lcuConnected&&!state.game.liveConnected)state.autoStatus=snapshot.client?'已发现客户端窗口，正在连接…':'等待英雄联盟客户端…';
 }
 async function pollGame(){
@@ -180,19 +187,41 @@ async function scanGame(){
   if(!activeMayhem() && (state.game.queueId || !/ARAM/i.test(state.game.gameMode||'')))throw new Error('当前不是已确认的海克斯模式');
   captureBusy=true;captureAt=Date.now();const epoch=gameEpoch;
   try{
-    const sources=await desktopCapturer.getSources({types:['window'],thumbnailSize:{width:1920,height:1080},fetchWindowIcons:false});
+    const sources=await desktopCapturer.getSources({types:['window'],thumbnailSize:{width:2560,height:1440},fetchWindowIcons:false});
+    if(epoch!==gameEpoch||quitting)return;
     const source=sources.find(s=>{try{return BigInt(s.id.split(':')[1])===BigInt(w.hwnd);}catch{return false;}});
     if(!source||source.thumbnail.isEmpty())throw new Error('游戏窗口画面暂不可用，请使用无边框模式');
+    const iconStart=Date.now(),size=source.thumbnail.getSize();
+    const visual=iconTracker.observe(matchAugmentIcons({...size,bgraBuffer:source.thumbnail.toBitmap()},iconTemplates),{active:Boolean(state.monitor.game?.foreground)});
+    state.visualSelection={matches:visual.matches,pending:visual.pending,durationMs:Date.now()-iconStart};
+    if(visual.replacedIds?.length)state.selectedAugments=state.selectedAugments.filter(a=>a.confidence!=='visual'||!visual.replacedIds.includes(a.id));
+    for(const selected of visual.selected){
+      if(ignoredVisualSelections.has(selected.id))continue;
+      const existing=state.selectedAugments.find(a=>a.id===selected.id);
+      if(!existing)state.selectedAugments.push({...selected});
+      else if(existing.confidence!=='confirmed')Object.assign(existing,selected);
+    }
+    recalculate();
     state.ocr={...state.ocr,status:'running'};
-    const result=await ocr.read(source.thumbnail,settings.ocrRegion,state.catalog.augments);
+    let result=await ocr.read(source.thumbnail,{x:.08,y:.08,width:.84,height:.84},state.catalog.augments);
     if(epoch!==gameEpoch||quitting)return;
+    state.shop=shopTracker.observe(detectShop(result));
     lastOffer=locateOffer(result,state.catalog.augments);
+    // A tighter second pass preserves small title strokes when the wider shop
+    // scan found augment names but could not establish the three-card layout.
+    if(!lastOffer.cards.length&&result.matches.filter(m=>m.exact).length>=2){
+      result=await ocr.read(source.thumbnail,settings.ocrRegion,state.catalog.augments);
+      if(epoch!==gameEpoch||quitting)return;
+      lastOffer=locateOffer(result,state.catalog.augments);
+    }
     lastOffer.observedAt=result.capturedAt||new Date().toISOString();
     if(lastOffer.cards?.length===3)inferredMode=true;
     state.ocr={...result,status:'done',message:lastOffer.cards?.length===3?'已定位三个强化符文':'持续监测卡片区域'};
-    state.autoStatus=lastOffer.cards?.length===3?'已定位强化卡片，自动更新推荐指数':'自动监测中，等待强化卡片出现';
+    state.autoStatus=lastOffer.cards?.length===3?'已定位强化卡片，自动更新推荐指数':state.shop.visible?'商店已打开，显示出装参考':'自动监测中，商店或海克斯页面出现时显示推荐';
+    state.offer.present=lastOffer.cards?.length===3;
     consumeTracking(tracker.observe(lastOffer,pointer(state.monitor)));
-  }catch(error){consumeTracking(tracker.invalidate());state.ocr={...state.ocr,status:'error',message:error.message};state.autoStatus=error.message;publish();}
+    layout();publish();
+  }catch(error){state.shop=shopTracker.invalidate();state.offer.present=false;lastOffer=null;consumeTracking(tracker.invalidate());state.ocr={...state.ocr,status:'error',message:error.message};state.autoStatus=error.message;publish();}
   finally{captureBusy=false;}
 }
 async function scanLoop(){
@@ -204,7 +233,7 @@ async function writeStatus(){
     lcuConnected:state.game.lcuConnected,liveConnected:state.game.liveConnected,queueId:state.game.queueId,
     champion:state.selectedChampion?.key,autoStatus:state.autoStatus,autoScan:settings.autoScan,autoFollow:settings.autoFollow,
     window:state.monitor.game||state.monitor.client||null,offeredIds:state.offeredIds,selectedAugments:state.selectedAugments,
-    overlayVisible:state.overlayVisible,cardOverlays:cardWindows.map(w=>({visible:w.isVisible(),bounds:w.getBounds()})),
+    overlayVisible:state.overlayVisible,overlayMode:state.overlayMode,shop:state.shop,visualSelection:state.visualSelection,shopOverlay:{visible:overlay.isVisible(),bounds:overlay.getBounds()},cardOverlays:cardWindows.map(w=>({visible:w.isVisible(),bounds:w.getBounds()})),
     error:state.error,ocr:{status:state.ocr.status,message:state.ocr.message,lastCapture:captureAt},
     itemIds:state.game.ownItems?.map(i=>i.id),availableChampionIds:state.game.availableChampionIds};
   await fs.mkdir(app.getPath('userData'),{recursive:true});
@@ -223,7 +252,7 @@ function registerIpc(){
   handle('refresh',async()=>{state.catalog=await provider.get('index',null,true);await loadChampion(state.selectedChampion?.key||settings.manualChampion,true);publish();});
   const validIds=ids=>Array.isArray(ids)&&ids.every(id=>state.catalog.augments.some(a=>a.id===id));
   handle('set-offers',ids=>{if(!validIds(ids)||ids.length>3)throw new Error('最多选择三个有效符文');state.offeredIds=[...new Set(ids)];recalculate();publish();});
-  handle('set-selected-augments',ids=>{if(!validIds(ids)||ids.length>20)throw new Error('无效的已选符文');state.selectedAugments=[...new Set(ids)].map(id=>state.selectedAugments.find(a=>a.id===id)||({id,name:state.catalog.augments.find(a=>a.id===id).name,confidence:'confirmed',evidence:'手动校正'}));recalculate();publish();});
+  handle('set-selected-augments',ids=>{if(!validIds(ids)||ids.length>20)throw new Error('无效的已选符文');for(const a of state.selectedAugments)if(!ids.includes(a.id))ignoredVisualSelections.add(a.id);for(const id of ids)ignoredVisualSelections.delete(id);state.selectedAugments=[...new Set(ids)].map(id=>state.selectedAugments.find(a=>a.id===id)||({id,name:state.catalog.augments.find(a=>a.id===id).name,confidence:'confirmed',evidence:'手动校正'}));recalculate();publish();});
   handle('confirm-selected-augment',id=>{const a=state.selectedAugments.find(a=>a.id===id);if(!a)throw new Error('未找到该符文');a.confidence='confirmed';a.evidence='手动确认';recalculate();publish();});
   handle('scan',scanGame);handle('toggle-overlay',toggleOverlay);
   handle('import-image',()=>{throw new Error('自动识别已启用，无需导入图片');});
@@ -233,7 +262,7 @@ function registerIpc(){
 async function start(){
   Menu.setApplicationMenu(null);session.defaultSession.setPermissionRequestHandler((_w,_p,cb)=>cb(false));session.defaultSession.setPermissionCheckHandler(()=>false);
   let previous={};try{previous=JSON.parse(await fs.readFile(settingsFile(),'utf8'));}catch{}
-  settings=validateSettings(previous.schemaVersion===2?previous:{...previous,autoFollow:true,autoOverlay:true,autoScan:true});
+  settings=validateSettings(previous.schemaVersion>=2?previous:{...previous,autoFollow:true,autoOverlay:true,autoScan:true});
   if(smoke)settings={...DEFAULTS};
   provider=new OpggProvider(path.join(app.getPath('userData'),'cache'),path.resolve(__dirname,'../data/seed'));
   reader=new LeagueReader();
@@ -242,6 +271,11 @@ async function start(){
   if(!state.catalog)throw new Error('内置资料缺失，请重新解压完整安装包');
   try{staticData=JSON.parse(await fs.readFile(path.resolve(__dirname,'../data/static/riot.json'),'utf8'));}catch{}
   try{state.imageAssets=JSON.parse(await fs.readFile(path.resolve(__dirname,'../assets/manifest.json'),'utf8'));}catch{}
+  iconTemplates=prepareTemplates(state.catalog.augments.flatMap(a=>{
+    const local=state.imageAssets[a.image?.split('?')[0]];if(!local)return [];
+    const image=nativeImage.createFromPath(path.resolve(__dirname,'../assets/opgg',local));if(image.isEmpty())return [];
+    return [{id:a.id,name:a.name,image:{...image.getSize(),bgraBuffer:image.toBitmap()}}];
+  }));
   const prefs={preload:path.join(__dirname,'preload.cjs'),nodeIntegration:false,contextIsolation:true,sandbox:true};
   const primary=screen.getPrimaryDisplay().workArea;
   panel=new BrowserWindow({title:'Hexthon · 海克斯助手',width:Math.min(1280,primary.width),height:Math.min(900,primary.height),minWidth:900,minHeight:650,
@@ -250,9 +284,9 @@ async function start(){
     const win=new BrowserWindow({width,height,show:false,frame:false,transparent:true,resizable:false,focusable:false,skipTaskbar:true,hasShadow:false,alwaysOnTop:true,webPreferences:prefs});
     win.setIgnoreMouseEvents(true,{forward:true});win.setAlwaysOnTop(true,'screen-saver');protect(win);return win;
   };
-  overlay=createOverlay(320,590);for(let i=0;i<3;i++)cardWindows.push(createOverlay(260,116));
+  overlay=createOverlay(300,360);for(let i=0;i<3;i++)cardWindows.push(createOverlay(260,116));
   protect(panel);panel.on('close',e=>{if(!quitting){e.preventDefault();panel.hide();}});registerIpc();updateDisplays();
-  await Promise.all([panel.loadFile(path.join(__dirname,'renderer/index.html')),overlay.loadFile(path.join(__dirname,'renderer/overlay.html')),
+  await Promise.all([panel.loadFile(path.join(__dirname,'renderer/index.html')),overlay.loadFile(path.join(__dirname,'renderer/shop.html')),
     ...cardWindows.map((w,i)=>w.loadFile(path.join(__dirname,'renderer/cards.html'),{query:{slot:String(i)}}))]);
   const initialLoad=loadChampion(settings.manualChampion);
   if(smoke){
@@ -268,7 +302,7 @@ async function start(){
   monitor=new WindowMonitor();monitor.on('update',onWindowUpdate);
   monitor.on('pointer',(_cursor,snapshot)=>{if(lastOffer&&state.game.phase==='InProgress')consumeTracking(tracker.observe(lastOffer,pointer(snapshot)));});
   monitor.start();
-  viewTimer=setInterval(()=>{const expired=tracker.expire();if(expired.changed)consumeTracking(expired);layout();},200);statusTimer=setInterval(()=>writeStatus().catch(()=>{}),2000);
+  viewTimer=setInterval(()=>{const expired=tracker.expire();if(expired.changed)consumeTracking(expired);state.shop=shopTracker.expire();layout();},200);statusTimer=setInterval(()=>writeStatus().catch(()=>{}),2000);
   for(const name of ['display-metrics-changed','display-added','display-removed'])screen.on(name,updateDisplays);
   pollGame();scanLoop();provider.get('index').then(d=>{state.catalog=d;recalculate();publish();}).catch(reportError);
   if(process.argv.includes('--panel'))showPanel();
