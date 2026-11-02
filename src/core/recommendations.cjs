@@ -125,9 +125,9 @@ function rankDraft({ catalog, team = [], availableChampionIds = [], selfId = nul
   let removedFallback = false;
   const teammates = team.filter(p => {
     if (p.isSelf) return false;
-    if (!selfEntry && !removedFallback && p.championId === currentId) { removedFallback = true; return false; }
+    if (!selfEntry && !removedFallback && currentId > 0 && p.championId === currentId) { removedFallback = true; return false; }
     return true;
-  }).map(p => champions.find(c => c.id === p.championId) || { id: p.championId }).filter(p => p.id);
+  }).map(p => champions.find(c => c.id === p.championId) || { id: p.championId || null });
   const taken = new Set(teammates.map(c => c.id));
   const composition = summarizeComposition(teammates, staticData);
   const candidates = [...new Set(availableChampionIds)].filter(id => id === currentId || !taken.has(id)).map(id => champions.find(c => c.id === id)).filter(Boolean).map(c => {
@@ -135,14 +135,14 @@ function rankDraft({ catalog, team = [], availableChampionIds = [], selfId = nul
     const profile = championProfile(c, staticData), reasons = [], components = { tier: tierBase, rank: 0, composition: 0 };
     if (tierBase !== null) reasons.push(`OP.GG T${c.tier}`);
     if (Number.isInteger(c.rank) && c.rank > 0) { components.rank = Math.max(0, Math.round(5 * (1 - (c.rank - 1) / Math.max(1, champions.length - 1)))); reasons.push(`OP.GG 综合排名 ${c.rank}`); }
-    if (teammates.length >= 2 && profile.known) {
+    if (teammates.length >= 2 && composition.unknown === 0 && profile.known) {
       if (composition.frontline < 1 && profile.frontline >= 1) { components.composition += 12; reasons.push('补足当前队伍前排'); }
       else if (composition.frontline < .5 && profile.frontline > 0) { components.composition += 5; reasons.push('增加近战承伤角色'); }
       if (composition.magic === 0 && composition.physical >= 2 && profile.damage === 'magic') { components.composition += 9; reasons.push('补充队伍的法术输出方向'); }
       if (composition.physical === 0 && composition.magic >= 2 && profile.damage === 'physical') { components.composition += 9; reasons.push('补充队伍的物理输出方向'); }
       if (composition.support === 0 && composition.frontline >= 1 && profile.support) { components.composition += 4; reasons.push('为已有前排补充辅助功能'); }
       if (composition.support >= 2 && profile.support) { components.composition -= 6; reasons.push('队伍辅助角色较多，需要留意持续输出'); }
-    } else reasons.push('队友信息不足，暂不计阵容修正');
+    } else reasons.push(composition.unknown > 0 ? '部分队友英雄尚未识别，不判断阵容缺少的职责' : '队友信息不足，暂不计阵容修正');
     const score = tierBase === null ? null : clamp(tierBase + components.rank + components.composition);
     const winRate = finite(c.winRate) && c.winRate >= 0 && c.winRate <= 100 && c.winRateSource === 'OP.GG' ? c.winRate : null;
     return { ...c, championId: c.id, score, label: INDEX_LABEL, components, reasons, isCurrent: c.id === currentId,
@@ -165,6 +165,134 @@ function buildRecommendations({ builds = [], ownItems = null, staticData = bundl
     const annotated = items.filter(item => !isPoroSnack(item, staticData.items?.[item.id]?.name)).map(item => ({ ...item, owned: Array.isArray(ownItems) ? ownsOrUpgrade(item.id) : null }));
     return { items: annotated, next: Array.isArray(ownItems) ? annotated.find(i => !i.owned) || null : null };
   }).filter(row => row.items.length) })).filter(group => group.rows.length);
+}
+
+// Bounded purchase rules using observed public equipment, not inferred enemy
+// augments, cooldowns, actual damage shares or a predicted win probability.
+function matchupRecommendations({ champion = null, ownItems = null, team = [], opponents = [], selectedAugments = [], staticData = bundledStatic, builds = [] } = {}) {
+  const metadata = staticData?.items || {};
+  const idOf = item => {
+    const raw = typeof item === 'object' && item !== null ? item.id ?? item.itemID : item;
+    const id = typeof raw === 'number' || typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : NaN;
+    return Number.isSafeInteger(id) && id > 0 ? id : null;
+  };
+  const validItems = items => list(items).filter(item => {
+    const id = idOf(item); return id !== null && !isPoroSnack(item, metadata[id]?.name);
+  });
+  const own = validItems(ownItems), owned = new Set(own.map(idOf));
+  const text = meta => typeof meta?.description === 'string' ? meta.description : '';
+  const antiHeal = meta => /重伤|grievous wounds/i.test(text(meta));
+  const magicPen = meta => /\d+(?:\.\d+)?%\s*(?:法术穿透|magic penetration)/i.test(text(meta));
+  const armorPen = meta => /\d+(?:\.\d+)?%\s*(?:护甲穿透|armor penetration)/i.test(text(meta));
+  const stat = (meta, key) => finite(meta?.stats?.[key]) ? Math.max(0, meta.stats[key]) : 0;
+  // Explicit finished-item families verified in the bundled Riot metadata.
+  // Components (4630/3035), boots and conditional Terminus penetration must
+  // not suppress a later completed penetration purchase. Mode IDs are not
+  // derived by arithmetic or guessed from a matching display name.
+  const penetrationFamilies = [
+    { kind: 'magic', base: 3135, ids: [3135, 223135, 773135] },
+    { kind: 'magic', base: 3137, ids: [3137, 223137] },
+    { kind: 'physical', base: 3033, ids: [3033, 223033] },
+    { kind: 'physical', base: 3036, ids: [3036, 223036] },
+    { kind: 'physical', base: 6694, ids: [6694, 226694] },
+    { kind: 'physical', base: 3035, ids: [773035] },
+  ];
+  const finishedPenetration = (meta, id, kind) => {
+    const family = penetrationFamilies.find(f => f.kind === kind && f.ids.includes(id));
+    if (!family || !meta || typeof meta.name !== 'string' || meta.name !== metadata[family.base]?.name) return false;
+    if (kind === 'magic') return stat(meta, 'FlatMagicDamageMod') > 0 && list(meta.tags).includes('MagicPenetration') &&
+      (magicPen(meta) || id === 773135 && /无视目标\d+(?:\.\d+)?%的魔法抗性/.test(text(meta)));
+    return stat(meta, 'FlatPhysicalDamageMod') > 0 && list(meta.tags).includes('ArmorPenetration') &&
+      (armorPen(meta) || id === 773035 && /无视对手\d+(?:\.\d+)?%的护甲/.test(text(meta)));
+  };
+  const hasFinishedPenetration = kind => own.some(item => finishedPenetration(metadata[idOf(item)], idOf(item), kind));
+  const hasOwn = predicate => own.some(item => predicate(metadata[idOf(item)]));
+  const ownsOrUpgrade = id => {
+    const pending = [id], visited = new Set();
+    while (pending.length && visited.size < 100) {
+      const next = Number(pending.shift());
+      if (owned.has(next)) return true;
+      if (visited.has(next)) continue;
+      visited.add(next); pending.push(...list(metadata[next]?.into));
+    }
+    return false;
+  };
+  const features = itemFeatures(ownItems, staticData), profile = championProfile(champion, staticData);
+  const damage = features.ap >= 60 && features.ad >= 40 ? 'mixed' : features.ap >= 60 ? 'magic' : features.ad >= 40 ? 'physical' : profile.damage;
+  const enemyPlayers = list(opponents).filter(p => p && typeof p === 'object');
+  const allyPlayers = list(team).filter(p => p && typeof p === 'object' && !p.isSelf);
+  const armorHolders = [], resistanceHolders = [], sustainHolders = [], allyAntiHeal = [];
+  const heroId = player => Number.isSafeInteger(Number(player?.championId)) && Number(player.championId) > 0 ? Number(player.championId) : null;
+  for (const enemy of enemyPlayers) {
+    if (!Array.isArray(enemy.items)) continue;
+    const armorItems = [], resistanceItems = [], sustainItems = [];
+    let purchasedArmor = 0, purchasedMagicResist = 0;
+    for (const item of validItems(enemy.items)) {
+      const id = idOf(item), meta = metadata[id], count = Number.isInteger(item?.count) && item.count > 0 ? Math.min(item.count, 6) : 1;
+      if (stat(meta, 'FlatArmorMod') > 0) { armorItems.push(id); purchasedArmor += stat(meta, 'FlatArmorMod') * count; }
+      if (stat(meta, 'FlatSpellBlockMod') > 0) { resistanceItems.push(id); purchasedMagicResist += stat(meta, 'FlatSpellBlockMod') * count; }
+      // Tags or positive stat values establish an owned sustain item. Merely
+      // being a Support/Mage does not establish healing or a healing augment.
+      if (stat(meta, 'PercentLifeStealMod') > 0 || list(meta?.tags).some(tag => tag === 'LifeSteal' || tag === 'SpellVamp')) sustainItems.push(id);
+    }
+    if (purchasedArmor >= 50) armorHolders.push({ championId: heroId(enemy), itemIds: [...new Set(armorItems)], purchasedArmor });
+    if (purchasedMagicResist >= 30) resistanceHolders.push({ championId: heroId(enemy), itemIds: [...new Set(resistanceItems)], purchasedMagicResist });
+    if (sustainItems.length) sustainHolders.push({ championId: heroId(enemy), itemIds: [...new Set(sustainItems)] });
+  }
+  for (const ally of allyPlayers) {
+    if (!Array.isArray(ally.items)) continue;
+    const ids = validItems(ally.items).map(idOf).filter(id => antiHeal(metadata[id]));
+    if (ids.length) allyAntiHeal.push({ championId: heroId(ally), itemIds: [...new Set(ids)] });
+  }
+  const confirmedAugments = list(selectedAugments).filter(a => a && a.confidence === 'api' && Number.isInteger(a.id) && a.id > 0);
+  const evidence = {
+    source: '本机公开对局装备 + Riot 静态装备资料；候选优先保留 OP.GG 顺序',
+    ownItemsKnown: Array.isArray(ownItems), damageDirection: damage,
+    teamChampionIds: list(team).map(heroId).filter(Boolean), opponentChampionIds: enemyPlayers.map(heroId).filter(Boolean),
+    opponentPlayers: enemyPlayers.length, opponentInventoriesKnown: enemyPlayers.filter(p => Array.isArray(p.items)).length,
+    allyPlayers: allyPlayers.length, allyInventoriesKnown: allyPlayers.filter(p => Array.isArray(p.items)).length,
+    armorHolders, resistanceHolders, sustainHolders, allyAntiHeal,
+    confirmedSelectedAugmentIds: [...new Set(confirmedAugments.map(a => a.id))], completeAugments: false,
+  };
+  const recommendations = [];
+  const baseIds = [];
+  for (const group of list(builds)) for (const row of list(group?.rows)) {
+    for (const item of validItems(Array.isArray(row) ? row : row?.items)) {
+      const id = idOf(item); if (!baseIds.includes(id)) baseIds.push(id);
+    }
+  }
+  const choose = (predicate, fallbacks = []) => [...new Set([...baseIds, ...fallbacks])].find(id => {
+    const meta = metadata[id];
+    return meta && typeof meta.name === 'string' && meta.gold?.purchasable === true && !isPoroSnack({ id, name: meta.name }) &&
+      !ownsOrUpgrade(id) && predicate(meta, id);
+  });
+  const add = (id, reason, priority) => {
+    if (!id) return;
+    const existing = recommendations.find(r => r.item.id === id);
+    if (existing) { existing.reason += ` ${reason}`; existing.priority = Math.max(existing.priority, priority); return; }
+    recommendations.push({ item: { id, name: metadata[id].name }, reason, confidence: 'rule', priority,
+      source: baseIds.includes(id) ? 'OP.GG 路线中的情境候选' : 'Riot 装备资料的情境补充（以商店可购为准）' });
+  };
+  if (Array.isArray(ownItems)) {
+    if (damage === 'magic' && resistanceHolders.length && !hasFinishedPenetration('magic')) {
+      add(choose((meta, id) => finishedPenetration(meta, id, 'magic'), [3135, 3137]), `已读到 ${resistanceHolders.length} 名对手的装备提供至少 30 魔抗；当前偏法术方向，可考虑百分比法穿。这不是对手总魔抗。`, 80);
+    }
+    if (damage === 'physical' && armorHolders.length && !hasFinishedPenetration('physical')) {
+      add(choose((meta, id) => finishedPenetration(meta, id, 'physical'), features.crit > 0 ? [3036, 3033, 6694] : [6694, 3036, 3033]), `已读到 ${armorHolders.length} 名对手的装备提供至少 50 护甲；当前偏物理方向，可考虑百分比护甲穿透。这不是对手总护甲。`, 80);
+    }
+    if (sustainHolders.length && !hasOwn(antiHeal) && ['magic', 'physical'].includes(damage)) {
+      const candidates = damage === 'magic' ? [3916, 3165] : [3123, 6609, 3033];
+      const id = choose(meta => antiHeal(meta) && stat(meta, damage === 'magic' ? 'FlatMagicDamageMod' : 'FlatPhysicalDamageMod') > 0, candidates);
+      const coverage = allyAntiHeal.length ? `队友已有 ${allyAntiHeal.length} 人持有重伤装备，降低补购优先级；实际命中覆盖仍未知。` :
+        allyPlayers.length && evidence.allyInventoriesKnown === allyPlayers.length ? '已读取的队友装备中未见重伤；效果仍需命中目标。' : '队友装备信息不完整，不推断队伍缺少重伤。';
+      add(id, `对手已持有吸血类装备，可考虑重伤以应对回复。${coverage}`, allyAntiHeal.length ? 35 : 70);
+    }
+  }
+  recommendations.sort((a, b) => b.priority - a.priority);
+  const unknown = !Array.isArray(ownItems) ? '自身装备未读取，暂不生成补购建议。' :
+    !enemyPlayers.length || evidence.opponentInventoriesKnown === 0 ? '对手装备未读取，暂不作装备对策判断。' :
+      evidence.opponentInventoriesKnown < enemyPlayers.length ? '对手装备仅部分可读，未读取部分保持未知。' : '根据双方已读取的公开装备形成有限规则建议。';
+  return { completeAugments: false, recommendations: recommendations.slice(0, 4), summary: `${unknown}海克斯记录不完整；这些建议不是胜率或最优出装结论。`, evidence };
 }
 
 function rerollAdvice({ offeredIds = [], scores = [], augments = [], rerollsRemaining = null, selectedKnown = false } = {}) {
@@ -190,4 +318,4 @@ function rerollAdvice({ offeredIds = [], scores = [], augments = [], rerollsRema
   if (best < 62 && stronger.length >= 5) return { action: 'consider-reroll', label: remainingKnown ? '可考虑刷新' : '有次数可考虑刷新', reason: `${remainingKnown ? '' : '若仍有刷新次数，'}当前最高指数 ${best}；已知同品质列表有 ${stronger.length} 个高出至少 12 分的选项，可考虑刷新。刷新池和概率未知。${caveat}`, ...context, strongerKnownCount: stronger.length };
   return { action: 'keep', label: '倾向保留', reason: `当前已有 ${best} 分选项，倾向保留；指数为规则参考。${caveat}`, ...context };
 }
-module.exports = { INDEX_LABEL, scoreAugments, rankDraft, buildRecommendations, rerollAdvice, itemFeatures, championProfile, summarizeComposition, bundledStatic };
+module.exports = { INDEX_LABEL, scoreAugments, rankDraft, buildRecommendations, matchupRecommendations, rerollAdvice, itemFeatures, championProfile, summarizeComposition, bundledStatic };

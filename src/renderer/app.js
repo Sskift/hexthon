@@ -15,7 +15,7 @@ function scoreBadge(score, compact=false) { return `<span class="recommend-score
 function winRate(value) { return typeof value==='number'&&Number.isFinite(value)?`${(value<=1?value*100:value).toFixed(1)}%`:'未公开'; }
 function championById(id) { return state.catalog?.champions.find(c=>c.id===id); }
 function selectedList() { return (state.selectedAugments||[]).map(s=>({...augmentById(s.id),...s})); }
-const selectionConfidence=a=>a.confidence==='visual'?'图标识别':a.confidence==='inferred'?'推断':'已确认';
+const selectionConfidence=a=>a.confidence==='api'?'技能字段':a.confidence==='visual'?'图标识别':a.confidence==='inferred'?'推断':'已确认';
 function setTab(name) {
   tab=name;
   document.querySelectorAll('.nav-button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
@@ -33,11 +33,16 @@ function renderChampions() {
 function render() {
   if (!state) return;
   const c = state.selectedChampion, g = state.game;
+  const apiOnly=state.recognitionMode==='api';
   if(g.phase!==lastPhase){if(g.phase==='ChampSelect')setTab('draft');else if(g.phase==='InProgress')setTab('augments');lastPhase=g.phase;}
   $('auto-status').textContent = state.autoStatus || (g.liveConnected ? '已连接游戏，正在自动检查强化卡片与构筑变化。' : g.lcuConnected ? '已连接客户端，等待进入选人或对局。' : '等待英雄联盟窗口，进入选人或对局后自动跟随。');
-  document.querySelector('.auto-banner strong').textContent = state.settings.autoScan===false ? '自动识别已暂停' : '自动识别运行中';
+  document.querySelector('.auto-banner strong').textContent = apiOnly?'本地接口模式 · 无画面采集':state.settings.autoScan===false ? '自动识别已暂停' : '自动识别运行中';
   $('patch').textContent = `PATCH ${state.augmentMeta?.patch || state.catalog?.patch || '—'}`;
   $('overlay-toggle').textContent = state.overlayEnabled ? '暂停场景提示' : '开启场景提示';
+  $('overlay-toggle').hidden=apiOnly;
+  $('scan').hidden=apiOnly;
+  document.querySelector('input[name=autoScan]').disabled=apiOnly;
+  document.querySelector('.recognition-tools').hidden=apiOnly;
   const online = g.lcuConnected || g.liveConnected;
   $('connection-strip').innerHTML = `<div class="connection-card ${online?'online':''}"><span class="connection-symbol">⌁</span><div><strong>${online?'已连接本地客户端':'等待国服客户端'}</strong><small>${online?'本机只读接口':'也可以先查阅英雄资料'}</small></div></div><div class="connection-card ${g.isMayhem?'online':''}"><span class="connection-symbol">◇</span><div><strong>${phases[g.phase] || escapeHtml(g.phase)}</strong><small>${g.isMayhem?'海克斯大乱斗':state.modeConfirmed?'本局模式：手动确认':'尚未确认海克斯模式'}</small></div></div><div class="connection-card online"><span class="connection-symbol">▤</span><div><strong>OP.GG 公开资料</strong><small>${state.augmentMeta?.cacheStatus==='stale'?'正在使用过期缓存':`${state.catalog?.champions.length||0} 位英雄 · ${state.catalog?.augments.length||0} 个符文`}</small></div></div>`;
   const following = state.settings.autoFollow && g.championId === c?.id;
@@ -67,17 +72,22 @@ function augmentById(id) { return state.augments.find(a => a.id === id) || state
 function renderOffers() {
   $('offer-slots').innerHTML = [0,1,2].map(i => {
     const a = augmentById(state.offeredIds[i]);
-    return a ? `<div class="offer-slot filled">${image(a)}<div><strong>${escapeHtml(a.name)}</strong><small>${a.scope==='champion'?'英雄专属':'通用档位'} · ${rarity[a.rarity]||''}</small></div>${scoreFor(a.id)?scoreBadge(scoreFor(a.id).score,true):tier(a)}<button data-remove="${a.id}" aria-label="移除${escapeHtml(a.name)}">×</button></div>` : `<div class="offer-slot empty"><span>0${i+1}</span><small>等待自动识别卡片</small></div>`;
+    return a ? `<div class="offer-slot filled">${image(a)}<div><strong>${escapeHtml(a.name)}</strong><small>${a.scope==='champion'?'英雄专属':'通用档位'} · ${rarity[a.rarity]||''}</small></div>${scoreFor(a.id)?scoreBadge(scoreFor(a.id).score,true):tier(a)}<button data-remove="${a.id}" aria-label="移除${escapeHtml(a.name)}">×</button></div>` : `<div class="offer-slot empty"><span>0${i+1}</span><small>${state.recognitionMode==='api'?'本地接口未提供候选海克斯':'等待自动识别卡片'}</small></div>`;
   }).join('');
   const o = state.ocr;
   const reroll=state.reroll;
   $('reroll-advice').innerHTML=reroll?`<span>重随参考</span><strong>${escapeHtml(reroll.label||reroll.advice||'等待充分信息')}</strong><p>${escapeHtml(reroll.reason||'')}</p>`:'<span>重随参考</span><p>识别到完整选项后，比较同品质符文池与当前构筑。</p>';
+  if(state.recognitionMode==='api'&&!state.offeredIds.length)$('reroll-advice').innerHTML='<span>海克斯资料</span><strong>当前接口未提供完整选项</strong><p>画面采集已停用。部分技能型海克斯可通过本地接口识别，普通被动海克斯仍可能缺失。</p>';
   $('scan').disabled = o.status === 'running'; $('import-image').disabled = o.status === 'running';
   $('ocr-results').innerHTML = o.status === 'idle' ? '' : `<p>${escapeHtml(o.message || '')}</p>${(o.matches||[]).map(m => `<div class="ocr-candidate"><span>${escapeHtml(m.name)} · ${m.exact?'名称匹配':`待确认 ${m.confidence}%`}</span><button data-offer="${m.id}">比较</button></div>`).join('')}${o.text?`<details><summary>查看识别原文</summary><pre>${escapeHtml(o.text)}</pre></details>`:''}`;
 }
 function renderBuilds() {
-  const signature = JSON.stringify([state.selectedChampion?.key,state.buildMeta,state.loading,state.game.ownItems,state.buildSuggestions]);
+  const signature = JSON.stringify([state.selectedChampion?.key,state.buildMeta,state.loading,state.game.ownItems,state.buildSuggestions,state.matchup]);
   if (signature === lastBuilds) return; lastBuilds = signature;
+  const matchup=state.matchup,evidence=matchup?.evidence;
+  const names=ids=>ids.map(id=>championById(id)?.name||`英雄 #${id}`).map(escapeHtml).join(' · ');
+  const coverage=evidence?`对手装备 ${evidence.opponentInventoriesKnown}/${evidence.opponentPlayers} · 队友装备 ${evidence.allyInventoriesKnown}/${evidence.allyPlayers}`:'等待当前英雄的对局信息';
+  $('matchup-list').innerHTML=`<div class="section-heading"><div><h2>本局装备适配</h2><p>${coverage}</p></div><span class="draft-stage">规则参考</span></div>${evidence?`<div class="matchup-roster"><p><span>己方</span>${names(evidence.teamChampionIds)}</p><p><span>对手</span>${names(evidence.opponentChampionIds)}</p></div>`:''}<p class="matchup-note">${escapeHtml(matchup?.summary||(state.game.liveConnected?'当前查阅的英雄与本局不同，跟随游戏英雄后显示对策。':'连接对局后，根据已读取的敌我装备更新建议。完整海克斯信息目前不可得。'))}</p>${matchup?.recommendations.length?matchup.recommendations.map(r=>`<article class="matchup-card"><h3>${escapeHtml(r.item.name)}</h3><p>${escapeHtml(r.reason)}</p><small>${escapeHtml(r.source)}</small></article>`).join(''):matchup?'<p class="matchup-empty">当前没有触发已实现的装备规则；继续参考下方 OP.GG 路线。</p>':''}`;
   const groups=state.buildSuggestions||[];
   $('build-list').innerHTML = groups.length ? groups.map(group => `<section class="build-group"><h3>${escapeHtml(group.name)}</h3>${group.rows.map((row,i) => `<div class="build-row"><span class="build-number">0${i+1}</span>${row.items.map(a => `<span class="item ${a.owned===true?'owned':row.next?.id===a.id?'next':''}">${image(a)}<span>${escapeHtml(a.name)}${a.owned===true?'<small>已拥有 / 已升级 ✓</small>':row.next?.id===a.id?'<small>可考虑下一件</small>':''}</span></span>`).join('<span class="item-arrow">›</span>')}</div>`).join('')}</section>`).join('') : `<div class="empty-state">${state.loading?'正在获取出装…':'暂未取得这个英雄的出装资料。可以更新资料，或打开 OP.GG 原页面。'}</div>`;
 }
@@ -85,8 +95,8 @@ function renderLoadout() {
   const items=state.game.ownItems||[];
   $('owned-items').innerHTML=items.length?items.map(i=>`<span class="loadout-item" title="${escapeHtml(i.name||i.id)}">${image(i)}<span>${escapeHtml(i.name||i.id)}</span></span>`).join(''):`<span class="loadout-empty">${Array.isArray(state.game.ownItems)?'暂无装备':'等待自动读取装备'}</span>`;
   const selected=selectedList();
-  $('selected-status').textContent=selected.some(a=>a.confidence!=='confirmed')?'含自动识别记录':'';
-  $('selected-augments').innerHTML=selected.length?selected.map(a=>`<span class="selected-pill ${a.confidence!=='confirmed'?'inferred':''}" title="${escapeHtml(a.evidence||'本地构筑记录')}">${escapeHtml(a.name||`#${a.id}`)}<small>${selectionConfidence(a)}</small>${a.confidence!=='confirmed'?`<button data-confirm-chosen="${a.id}" aria-label="确认${escapeHtml(a.name)}">✓</button>`:''}<button data-unchoose="${a.id}" aria-label="移除${escapeHtml(a.name)}">×</button></span>`).join(''):'<span class="loadout-empty">尚未检测到已选强化</span>';
+  $('selected-status').textContent=state.recognitionMode==='api'?'仅覆盖接口可读的部分强化':selected.some(a=>a.confidence!=='confirmed')?'含自动识别记录':'';
+  $('selected-augments').innerHTML=selected.length?selected.map(a=>`<span class="selected-pill ${a.confidence!=='confirmed'?'inferred':''}" title="${escapeHtml(a.evidence||'本地构筑记录')}">${escapeHtml(a.name||`#${a.id}`)}<small>${selectionConfidence(a)}</small>${a.confidence!=='confirmed'?`<button data-confirm-chosen="${a.id}" aria-label="确认${escapeHtml(a.name)}">✓</button>`:''}<button data-unchoose="${a.id}" aria-label="移除${escapeHtml(a.name)}">×</button></span>`).join(''):`<span class="loadout-empty">${state.recognitionMode==='api'?'接口未提供完整已选信息':'尚未检测到已选强化'}</span>`;
 }
 function renderDraft() {
   const team=state.game.team||[],d=state.draft||{},c=state.selectedChampion;

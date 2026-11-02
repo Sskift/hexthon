@@ -4,6 +4,7 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const exec = promisify(execFile);
+const {detectApiAugments}=require('./api-augments.cjs');
 const LCU_PATHS = new Set(['/lol-gameflow/v1/gameflow-phase', '/lol-gameflow/v1/session', '/lol-champ-select/v1/session']);
 const LIVE_PATHS = new Set(['/liveclientdata/activeplayer', '/liveclientdata/playerlist', '/liveclientdata/gamestats']);
 
@@ -72,7 +73,14 @@ function isPoroSnack(item, fallbackName = '') {
   return id === 2052 || id === 220013 || name === '魄罗佳肴' || /^poro(?:snax|snacks?)$/.test(name);
 }
 function activePlayerFromLive(active, players) {
-  return (players || []).find(p => (active?.riotId && p.riotId === active.riotId) || (active?.summonerName && p.summonerName === active.summonerName)) || null;
+  const roster = (Array.isArray(players) ? players : []).filter(p => p && typeof p === 'object');
+  const riotId = typeof active?.riotId === 'string' && active.riotId.trim() ? active.riotId : null;
+  const summonerName = typeof active?.summonerName === 'string' && active.summonerName.trim() ? active.summonerName : null;
+  // A supplied Riot ID is authoritative. A missing/ambiguous exact match stays
+  // unknown instead of attributing another same-name player's data to ourselves.
+  const matches = riotId ? roster.filter(p => p.riotId === riotId) :
+    summonerName ? roster.filter(p => p.summonerName === summonerName) : [];
+  return matches.length === 1 ? matches[0] : null;
 }
 function championIdFromPlayer(player, champions) {
   if (!player) return null;
@@ -93,9 +101,17 @@ function draftFromSession(session) {
   return { team, bench, availableChampionIds, localPlayerCellId,
     rerollsRemaining: Number.isInteger(rawRerolls) && rawRerolls >= 0 ? rawRerolls : null };
 }
-function liveContext(active, players, champions) {
+function liveContext(active, players, champions, augments=[]) {
   const own = activePlayerFromLive(active, players);
-  const inventory = own && Array.isArray(own.items) ? own.items.filter(item => Number(item.itemID) > 0).map(item => ({ id: Number(item.itemID), name: String(item.displayName || ''), count: Number(item.count) || 1 })) : null;
+  const inventoryOf = player => Array.isArray(player?.items) ? player.items.filter(item => item && Number.isSafeInteger(Number(item.itemID)) && Number(item.itemID) > 0)
+    .map(item => ({ id: Number(item.itemID), name: String(item.displayName || ''), count: Number.isInteger(item.count) && item.count > 0 ? item.count : 1 })) : null;
+  const inventory = inventoryOf(own);
+  const teamKnown = own && typeof own.team === 'string' && own.team.length > 0;
+  // Return only gameplay data. Names, Riot IDs, account IDs and other player
+  // identifiers never leave this adapter; an unread inventory stays null.
+  const publicPlayer = (player, i) => ({ championId: championIdFromPlayer(player, champions), cellId: i, isSelf: player === own,
+    items: inventoryOf(player)?.filter(item => !isPoroSnack(item)) ?? null });
+  const roster = Array.isArray(players) ? players.filter(p => p && typeof p.team === 'string' && p.team.length > 0) : [];
   const stats = {};
   for (const key of ['abilityPower', 'attackDamage', 'attackSpeed', 'attackRange', 'critChance', 'maxHealth', 'armor', 'magicResist', 'resourceMax', 'abilityHaste']) {
     const value = active?.championStats?.[key]; if (typeof value === 'number' && Number.isFinite(value)) stats[key] = value;
@@ -104,14 +120,15 @@ function liveContext(active, players, champions) {
   return { ownItems: inventory?.filter(item => !isPoroSnack(item)) ?? null,
     ownUtilityItems: inventory?.filter(item => isPoroSnack(item)) ?? null,
     ownChampStats: Object.keys(stats).length ? stats : null,
-    ownSelectedAugmentIds: null, selectedAugmentsSource: 'unavailable',
-    team: own ? players.filter(p => p.team === own.team).map((p, i) => ({ championId: championIdFromPlayer(p, champions), cellId: i, isSelf: p === own })) : [],
+    ownSelectedAugmentIds: null, detectedAugments:detectApiAugments(own,augments).augments, selectedAugmentsSource: 'partial-summoner-spells',
+    team: teamKnown ? roster.filter(p => p.team === own.team).map(publicPlayer) : [],
+    opponents: teamKnown ? roster.filter(p => p.team !== own.team).map(publicPlayer) : [],
   };
 }
 class LeagueReader {
   constructor(options = {}) { this.connection = null; this.nextDiscovery = 0; this.discover = options.discover || discoverConnection; this.get = options.get || localGet; }
   reset() { this.connection = null; this.nextDiscovery = 0; }
-  async poll(settings, champions) {
+  async poll(settings, champions, augments=[]) {
     if (!this.connection && Date.now() >= this.nextDiscovery) {
       this.nextDiscovery = Date.now() + 15000;
       this.connection = await this.discover(settings.leaguePath);
@@ -135,7 +152,7 @@ class LeagueReader {
     if (live[0].status === 'fulfilled' && live[1].status === 'fulfilled') {
       liveConnected = true; phase = 'InProgress';
       championId = championFromLive(live[0].value, live[1].value, champions) || championId;
-      context = liveContext(live[0].value, live[1].value, champions);
+      context = liveContext(live[0].value, live[1].value, champions, augments);
       draft = { ...draft, team: context.team, availableChampionIds: championId ? [championId] : [], bench: [], localPlayerCellId: context.team.find(p => p.isSelf)?.cellId ?? null, rerollsRemaining: null };
       level = live[0].value.level || null;
       if (live[2].status === 'fulfilled') {
