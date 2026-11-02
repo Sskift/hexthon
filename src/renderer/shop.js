@@ -23,7 +23,8 @@ function render(state){
   const kindLabel={quest:'任务前置',upgrade:'强化所需',synergy:'强化联动',matchup:'装备对策'};
   get('shop-advice').innerHTML=advice.length?advice.map(rec=>`<article class="advice-card"><div class="advice-heading"><strong>${escapeHtml(rec.item.name)}</strong><span>${rec.tentative?'待确认 · ':''}${kindLabel[rec.kind]||'装备对策'}</span></div><p title="${escapeHtml(rec.reason)}">${escapeHtml(rec.reason)}</p><small>${escapeHtml(rec.source?.startsWith('OP.GG')?'来自 OP.GG 路线':'Riot 装备资料 · 商店可购为准')}</small></article>`).join(''):
     `<div class="advice-empty">${!Array.isArray(inventory)?'当前装备未读取，暂不判断补购。':state.loading?'正在更新英雄资料…':'暂无有证据的额外补购建议，可参考下方路线。'}</div>`;
-  const contextualNote=matchup.cautions?.[0]||suggestion?.reasons?.[0];
+  const fit=advice[0]?.fit||nextItem?.fit;
+  const contextualNote=fit?.cautions?.[0]||matchup.cautions?.[0]||suggestion?.fitCautions?.[0]||fit?.benefits?.[0]||suggestion?.reasons?.[0];
   get('shop-context-note').textContent=contextualNote||'已选记录可能不完整 · 敌方强化未知';
   get('shop-context-note').title=contextualNote||matchup.summary||'';
   get('shop-items').innerHTML=items.length?items.slice(0,3).map((item,index)=>`<div class="shop-item ${item.owned===true?'owned':item.blocked?'blocked':nextItem?.id===item.id?'next':''}" title="${escapeHtml((item.reasons||[]).join('；')||item.name)}"><span class="item-number">0${index+1}</span>${image(item)}<div class="item-detail"><strong>${escapeHtml(item.name)}</strong><small>${item.owned===true?'已拥有 / 已升级':item.blocked?'暂不补购':nextItem?.id===item.id?'路线下一件':'路线参考'}</small></div></div>`).join(''):`<div class="empty">${state.loading?'正在读取出装…':'暂未取得核心出装资料'}</div>`;

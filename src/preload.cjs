@@ -15,5 +15,6 @@ contextBridge.exposeInMainWorld('hexthon', {
   undoSelectedCorrection: () => call('undo-selected-correction'),
   probeNativeItemSets:()=>call('native-itemsets-probe'),importNativeItemSet:()=>call('native-itemsets-import'),restoreNativeItemSets:()=>call('native-itemsets-restore'),
   exportDiagnostics:()=>call('export-diagnostics'),
+  checkUpdates:()=>call('updates-check'),downloadUpdate:()=>call('updates-stage'),applyUpdate:()=>call('updates-apply'),
   onState: callback => { const listener = (_event, value) => callback(value); ipcRenderer.on('state', listener); return () => ipcRenderer.removeListener('state', listener); },
 });

@@ -21,7 +21,7 @@ async function hash(filename){const sum=crypto.createHash('sha256');for await(co
   // reject our workspace/private files, without mislabelling dependency files.
   const disallowed=files.filter(name=>name.startsWith(base)&&!name.startsWith(base+'node_modules/')&&/(^|\/)(?:\.qa|\.research|\.git|\.github|experiments|tests|\.env)(?:\/|$|\.)/.test(name));
   if(disallowed.length)throw new Error('Release includes development or private files');
-  for(const required of ['Hexthon.exe',base+'src/main.cjs',base+'src/controller.cjs',base+'src/native/window-capture.ps1',base+'src/native/ocr.ps1',base+'data/seed/index.json',base+'data/static/riot.json']){
+  for(const required of ['Hexthon.exe','Start-Hexthon.vbs','Stop-Hexthon.vbs','HexthonLauncher.vbs',base+'src/main.cjs',base+'src/controller.cjs',base+'src/core/app-updates.cjs',base+'scripts/apply-update.cjs',base+'src/native/window-capture.ps1',base+'src/native/ocr.ps1',base+'data/seed/index.json',base+'data/static/riot.json']){
     if(!files.includes(required))throw new Error(`Missing required release file: ${required}`);
   }
   const pkg=JSON.parse(await fs.readFile(path.join(release,base,'package.json'),'utf8'));
@@ -33,7 +33,7 @@ async function hash(filename){const sum=crypto.createHash('sha256');for await(co
   const entries=[];
   for(const name of files){const filename=path.join(release,name);entries.push({path:name,size:(await fs.stat(filename)).size,sha256:await hash(filename)});}
   const output=path.join(root,'dist',directory,'manifest.json');
-  await fs.writeFile(output,JSON.stringify({schemaVersion:1,version,platform:'win32-x64',codeSigning:'not-configured',autoUpdate:false,
+  await fs.writeFile(output,JSON.stringify({schemaVersion:1,version,platform:'win32-x64',codeSigning:'not-configured',autoUpdate:false,updateMode:'manual-verified-portable',rollback:'startup-health',
     note:'SHA-256 verifies file integrity only. Do not bypass Windows application-control policy. Keep a previous version for manual rollback.',files:entries},null,2));
   console.log(JSON.stringify({passed:true,version,files:entries.length,totalBytes:entries.reduce((sum,row)=>sum+row.size,0),manifest:output,codeSigning:'not-configured'}));
 })().catch(error=>{console.error(error.message);process.exitCode=1;});

@@ -1,4 +1,10 @@
 const {normalize}=require('./matching.cjs');
+// Windows zh-Hans OCR occasionally emits the traditional form of the same
+// character. These explicit one-character equivalents are not edit-distance or
+// radical guesses; both catalog and reading use the mapping and collisions
+// below still abstain. The original OCR text remains unchanged in the result.
+const TITLE_CHAR_VARIANTS=Object.freeze({'疊':'叠','鯊':'鲨','獄':'狱','贈':'赠','龍':'龙','療':'疗'});
+function normalizeTitle(text){return normalize(text).replace(/[疊鯊獄贈龍療]/g,char=>TITLE_CHAR_VARIANTS[char]);}
 // OCR coordinates belong to the captured title strip. Restore client coordinates
 // before assigning words to cards; do not guess by dictionary substring matches.
 function titleOffer(result,region,geometry,augments,capturedAt) {
@@ -11,7 +17,7 @@ function titleOffer(result,region,geometry,augments,capturedAt) {
       rowY:region.y+(Number.isFinite(w.rowY)?w.rowY:w.y)*region.height,rowHeight:(Number.isFinite(w.rowHeight)?w.rowHeight:w.height)*region.height}));
   const names=new Map();
   for(const augment of augments||[]) {
-    const key=normalize(augment.name);if(!key)continue;
+    const key=normalizeTitle(augment.name);if(!key)continue;
     if(!names.has(key))names.set(key,augment);else if(names.get(key)?.id!==augment.id)names.set(key,null);
   }
   const cards=[];
@@ -25,7 +31,7 @@ function titleOffer(result,region,geometry,augments,capturedAt) {
       let row=rows.find(r=>Math.abs(r.y-word.rowY)<Math.min(r.height,word.rowHeight)*.55);
       if(!row){row={y:word.rowY,height:word.rowHeight,words:[]};rows.push(row);}row.words.push(word);
     }
-    const key=normalize(rows.sort((a,b)=>a.y-b.y).map(r=>r.words.sort((a,b)=>a.x-b.x).map(w=>w.text).join('')).join(''));
+    const key=normalizeTitle(rows.sort((a,b)=>a.y-b.y).map(r=>r.words.sort((a,b)=>a.x-b.x).map(w=>w.text).join('')).join(''));
     const augment=names.get(key);if(!augment){unknownSlots.push(i);continue;}
     recognized.push({slot:i,id:augment.id});
     const x=Math.min(...inside.map(w=>w.x)),y=Math.min(...inside.map(w=>w.y));
@@ -38,4 +44,4 @@ function titleOffer(result,region,geometry,augments,capturedAt) {
   if(new Set(cards.map(c=>c.id)).size!==3)return none('候选标题重复，等待清晰画面');
   return {cards,recognized,unknownSlots:[],confidence:100,reason:'按钮图形与三个完整标题匹配',observedAt:capturedAt};
 }
-module.exports={titleOffer};
+module.exports={titleOffer,normalizeTitle};

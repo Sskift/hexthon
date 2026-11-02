@@ -14,6 +14,10 @@ const {startupSettings,updateSettings}=require('./core/runtime-settings.cjs');
 const {compatibility,ScanBudget,diagnosticReport}=require('./core/runtime-diagnostics.cjs');
 const {buildItemSet}=require('./core/native-itemsets.cjs');
 const {NativeItemSetSync}=require('./core/native-itemsets-sync.cjs');
+const {AppUpdates,readJson,idleForUpdate}=require('./core/app-updates.cjs');
+const {writeUpdateHealth,TOKEN}=require('./core/update-transaction.cjs');
+const {gameIsClosed}=require('./core/update-game-guard.cjs');
+const {spawn}=require('node:child_process');
 const { cardBounds, shopBounds, draftBounds } = require('./core/overlay-layout.cjs');
 const {WindowCapture}=require('./core/window-capture.cjs');
 const sceneGate=require('./core/scene-gate.cjs');
@@ -28,16 +32,17 @@ const {visualContext,sameVisualContext,isCurrentVisualContext,captureMatchesCont
 const apiSmoke=process.argv.includes('--api-smoke-test');
 const lightSmoke=process.argv.includes('--light-smoke-test');
 const lifecycleSmoke=process.argv.includes('--lifecycle-smoke-test');
-const smoke = process.argv.includes('--smoke-test')||apiSmoke||lightSmoke||lifecycleSmoke;
-const lightVisualMode=process.argv.includes('--assist')||process.argv.includes('--visual-light-experimental')||lightSmoke||(lifecycleSmoke&&!process.argv.includes('--api-only'));
+const replaySmoke=process.argv.includes('--replay-smoke-test');
+const smoke = process.argv.includes('--smoke-test')||apiSmoke||lightSmoke||lifecycleSmoke||replaySmoke;
+const lightVisualMode=process.argv.includes('--assist')||process.argv.includes('--visual-light-experimental')||lightSmoke||replaySmoke||(lifecycleSmoke&&!process.argv.includes('--api-only'));
 const visualMode=lightVisualMode||process.argv.includes('--visual-experimental')||process.argv.includes('--smoke-test');
 if(!visualMode)app.disableHardwareAcceleration();
 app.setName('Hexthon');
-if (smoke) app.setPath('userData', path.resolve(__dirname, lifecycleSmoke?'../.qa/lifecycle-profile':'../.qa/profile'));
+if (smoke) app.setPath('userData', path.resolve(__dirname, replaySmoke?'../.qa/replay-profile':lifecycleSmoke?'../.qa/lifecycle-profile':'../.qa/profile'));
 let panel, overlay, draftWindow, tray, provider, reader, ocr, monitor, staticData = {}, quitting = false;
 let settingsQueue=Promise.resolve(),statusQueue=Promise.resolve(),shutdownPromise=null,shutdownComplete=false;
 let panelShowRequests=0;
-let nativeSync,nativeEpoch=0,recommendationCache=null;
+let nativeSync,nativeEpoch=0,recommendationCache=null,updates,applyingUpdate=false;
 const scanBudget=new ScanBudget();
 let gameTimer, scanTimer, viewTimer, statusTimer, manualOverlay = null, loadSerial = 0, captureBusy = false, gameEpoch = 0;
 let lastOffer = null, tracker = new OfferTracker(), inferredMode = false, captureAt = 0, trackingSignature = '';
@@ -58,7 +63,7 @@ const state = { version:require('../package.json').version, recognitionMode:ligh
   offeredIds:[], selectedAugments:[], augmentScores:[], reroll:null, draft:null, buildSuggestions:[], matchup:null,
   offer:{cards:[],stable:false,present:false}, shop:{visible:false}, visualSelection:{matches:[],pending:[]}, overlayMode:null, selectionHistoryComplete:false, monitor:{game:null,client:null}, autoStatus:visualMode?'正在寻找英雄联盟窗口…':'正在连接本地客户端接口…',
   ocr:{status:'idle',matches:[],text:''}, overlayVisible:false, loading:false, error:'', shortcuts:{},
-  modeConfirmed:false, displays:[], imageAssets:{},nativeItemSets:{status:'disabled'},compatibility:null,scanBudget:null };
+  modeConfirmed:false, displays:[], imageAssets:{},nativeItemSets:{status:'disabled'},compatibility:null,scanBudget:null,updates:{status:'idle'} };
 const settingsFile = () => path.join(app.getPath('userData'),'settings.json');
 const snapshot = () => ({...state,captureEnabled:visualMode&&settings.autoScan&&!quitting,settings});
 function publish() {
@@ -487,6 +492,31 @@ function registerIpc(){
     try{return {ok:true,data:await fn(arg)};}catch(error){return {ok:false,error:error.message};}
   });
   handle('get-state',snapshot,true);
+  const updateIdle=()=>!quitting&&idleForUpdate(state.game)&&!state.monitor.game?.visible;
+  handle('updates-check',()=>{if(applyingUpdate)throw new Error('更新正在安装，请等待');return updates.check();});
+  handle('updates-stage',async()=>{if(applyingUpdate)throw new Error('更新正在安装，请等待');if(!updateIdle()||!await gameIsClosed())throw new Error('请退出选人和游戏后下载更新；无法核实游戏进程时会保持当前版本');return updates.stage({isCurrent:updateIdle});});
+  handle('updates-apply',async()=>{
+    if(smoke)throw new Error('测试模式不安装程序更新');
+    if(applyingUpdate)throw new Error('更新正在安装，请等待');
+    applyingUpdate=true;let restartRequested=false,child;
+    try{
+    if(!updateIdle()||!await gameIsClosed())throw new Error('请退出选人和游戏后安装更新；无法核实游戏进程时会保持当前版本');
+    const flags=visualMode?['--assist',...(!settings.autoScan?['--paused']:[])]:[];
+    const previous={version:state.version,exe:process.execPath,cwd:app.getAppPath(),args:app.isPackaged?flags:[app.getAppPath(),...flags]};
+    const plan=await updates.prepare({previous,parentPid:process.pid,isCurrent:updateIdle});
+    child=spawn(process.execPath,[path.resolve(__dirname,'../scripts/apply-update.cjs'),plan.filename],{env:{...process.env,ELECTRON_RUN_AS_NODE:'1'},windowsHide:true,detached:true,stdio:'ignore'});
+    let failed=false;child.once('error',()=>{failed=true;});child.once('exit',()=>{failed=true;});
+    const deadline=Date.now()+10000;let ready=false;
+    while(!failed&&Date.now()<deadline){
+      const ack=await readJson(path.join(updates.root,`prepared-${plan.token}.json`));
+      if(ack?.token===plan.token&&ack.pid===child.pid&&Number.isFinite(ack.at)&&Date.now()>=ack.at&&Date.now()-ack.at<10000){ready=true;break;}
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    if(!ready||failed||child.exitCode!==null||!updateIdle()||!await gameIsClosed())throw new Error(!ready?'更新进程未就绪，当前版本继续运行':'游戏状态或更新进程已变化，更新已取消');
+    if(failed||child.exitCode!==null||!updateIdle())throw new Error('更新已取消，当前版本继续运行');
+    child.unref();restartRequested=true;setTimeout(()=>app.quit(),100);return {status:'restarting'};
+    }finally{if(!restartRequested){applyingUpdate=false;child?.kill();}}
+  });
   handle('native-itemsets-probe',async()=>{state.nativeItemSets=await nativeSync.probe();publish();return state.nativeItemSets;});
   handle('native-itemsets-import',async()=>{
     const itemSet=currentItemSet();if(!itemSet)throw new Error('当前英雄出装资料尚未就绪');
@@ -521,15 +551,18 @@ function registerIpc(){
 async function start(){
   if(quitting)return;
   Menu.setApplicationMenu(null);session.defaultSession.setPermissionRequestHandler((_w,_p,cb)=>cb(false));session.defaultSession.setPermissionCheckHandler(()=>false);
+  if(replaySmoke){session.defaultSession.webRequest.onBeforeRequest({urls:['http://*/*','https://*/*']},(_details,callback)=>callback({cancel:true}));globalThis.fetch=async()=>{throw new Error('REPLAY_NETWORK_DISABLED');};}
   let previous={};try{previous=JSON.parse(await fs.readFile(settingsFile(),'utf8'));}catch{}
   if(quitting)return;
   settings=startupSettings(previous,{visual:visualMode,light:lightVisualMode,paused:process.argv.includes('--paused')});
   if(smoke&&!lifecycleSmoke)settings={...settings,...DEFAULTS,autoScan:visualMode};
   provider=new OpggProvider(path.join(app.getPath('userData'),'cache'),path.resolve(__dirname,'../data/seed'));
-  if(lifecycleSmoke)provider.get=async(kind,key)=>{const value=await provider.read(kind==='index'?'index':`${key}-${kind}`);if(!value)throw new Error('Missing offline fixture');return value;};
+  if(lifecycleSmoke||replaySmoke)provider.get=async(kind,key)=>{const value=await provider.read(kind==='index'?'index':`${key}-${kind}`);if(!value)throw new Error('Missing offline fixture');return value;};
   reader=new LeagueReader();
   nativeSync=new NativeItemSetSync({client:reader.itemSetsClient(),journalPath:path.join(app.getPath('userData'),'native-itemsets.json')});
   state.nativeItemSets={status:settings.nativeItemSets?'waiting':'disabled'};
+  updates=new AppUpdates({root:path.join(app.getPath('userData'),'updates'),currentVersion:state.version,onChange:value=>{state.updates=value;publish();}});
+  await updates.init();
   if(visualMode)ocr=new OcrReader(path.join(app.getPath('userData'),'ocr'),()=>{},(bitmap,size)=>nativeImage.createFromBitmap(bitmap,size),lightVisualMode?{nativeWorker:new WindowsOcrWorker({timeoutMs:2500,retryMs:15000})}:{});
   state.catalog=await provider.read('index');
   if(quitting)return;
@@ -569,6 +602,12 @@ async function start(){
   if(smoke){
     await initialLoad;
     if(quitting)return;
+    if(replaySmoke){
+      await require('../scripts/replay-smoke.cjs').runReplaySmoke({app,panel,state,history:selectionHistory,applyHistory,snapshot,pollGame,scanGame,onWindowUpdate,
+        setReader:fake=>{reader=fake;},setCapture:fake=>{windowCapture=fake;},setOcr:fake=>{ocr=fake;},pointer:value=>consumeTracking(tracker.observe(lastOffer,value)),
+        getWindows:()=>BrowserWindow.getAllWindows(),loadedWindows:()=>Promise.all(BrowserWindow.getAllWindows().map(win=>windowLoads.get(win)))});
+      app.quit();return;
+    }
     if(lifecycleSmoke){
       await require('../scripts/lifecycle-smoke.cjs').runLifecycleSmoke({app,panel,overlay,draftWindow,cardWindows,state,snapshot,saveSettings,pollGame,scanGame,
         setReader:fake=>{reader=fake;},setCapture:fake=>{windowCapture=fake;},onWindowUpdate,history:selectionHistory,applyHistory,layout,
@@ -582,7 +621,7 @@ async function start(){
         await augmentWorker?.close();await ocr?.close();await historyStore.queue;quitting=true;app.exit(0);
       }catch(error){console.error(error.stack);await augmentWorker?.close();await ocr?.close();quitting=true;app.exit(1);}return;
     }
-    if(apiSmoke){try{await require('../scripts/api-smoke.cjs').runApiSmoke({panel,state,snapshot,publish,recalculate,windows:BrowserWindow.getAllWindows(),setNativeSync:fake=>{nativeSync=fake;}});quitting=true;app.exit(0);}catch(error){console.error(error.stack);app.exit(1);}return;}
+    if(apiSmoke){try{await require('../scripts/api-smoke.cjs').runApiSmoke({panel,state,snapshot,publish,recalculate,windows:BrowserWindow.getAllWindows(),setNativeSync:fake=>{nativeSync=fake;},setUpdates:fake=>{updates=fake;}});quitting=true;app.exit(0);}catch(error){console.error(error.stack);app.exit(1);}return;}
     try{await require('../scripts/smoke.cjs').runSmoke({panel,overlay,cardWindows,state,snapshot,publish,ocr,recalculate,layout});quitting=true;app.exit(0);}
     catch(error){console.error(error.stack);quitting=true;app.exit(1);}return;
   }
@@ -604,6 +643,8 @@ async function start(){
   for(const name of ['display-metrics-changed','display-added','display-removed'])screen.on(name,updateDisplays);
   pollGame();if(visualMode)scanLoop();provider.get('index').then(d=>{if(quitting)return;state.catalog=d;recalculate();publish();}).catch(reportError);
   if(process.argv.includes('--panel'))showPanel();
+  const healthToken=process.argv.find(value=>value.startsWith('--update-health='))?.slice('--update-health='.length);
+  if(healthToken&&TOKEN.test(healthToken)){await initialLoad;await writeUpdateHealth({root:updates.root,token:healthToken,version:state.version});}
 }
 const ownsInstance=app.requestSingleInstanceLock();
 if(!ownsInstance)app.quit();else app.whenReady().then(()=>process.argv.includes('--quit')?app.quit():start()).catch(error=>{console.error(error.stack||error);app.exit(1);});

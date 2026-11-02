@@ -24,12 +24,20 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run test:api
+      - run: npm run test:replay
+      - run: npm run test:update-lifecycle
+      - run: npm run test:panel-layout
       - run: npm run test:shop-layout
       - run: npm run package
       - run: npm run verify:package
+      - run: npm run archive:release
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: Hexthon-Windows-unsigned
-          path: dist/
+          path: |
+            dist/*.zip
+            dist/*.sha256
+            dist/*/manifest.json
+          compression-level: 0
           if-no-files-found: error
           retention-days: 7

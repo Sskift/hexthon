@@ -5,6 +5,22 @@ const { spawn } = require('node:child_process');
 const { createWorker } = require('tesseract.js');
 const { matchAugments } = require('./matching.cjs');
 
+// Threshold the original title pixels before interpolation. Thick small glyphs
+// can lose their counters during resizing; a second, lower threshold preserves
+// weaker strokes. Percentiles adapt to brightness without changing source data.
+function brightTextBitmap(bitmap, strength=.86){
+  if(!Buffer.isBuffer(bitmap)||bitmap.length<64||bitmap.length%4)return null;
+  const histogram=new Uint32Array(256),pixels=bitmap.length/4;
+  for(let i=0;i<bitmap.length;i+=4)histogram[Math.round(.114*bitmap[i]+.587*bitmap[i+1]+.299*bitmap[i+2])]++;
+  const percentile=fraction=>{let sum=0;for(let value=0;value<256;value++){sum+=histogram[value];if(sum>=Math.ceil(pixels*fraction))return value;}return 255;};
+  const background=percentile(.5),foreground=percentile(.995);
+  if(foreground<150||foreground-background<80)return null;
+  const threshold=background+(foreground-background)*(Number.isFinite(strength)?Math.max(.7,Math.min(.95,strength)):.86);
+  const output=Buffer.from(bitmap);
+  for(let i=0;i<output.length;i+=4){const luma=.114*bitmap[i]+.587*bitmap[i+1]+.299*bitmap[i+2];output[i]=output[i+1]=output[i+2]=luma>=threshold?0:255;output[i+3]=255;}
+  return output;
+}
+
 function normalizeOcrLines(lines, cropRect, croppedSize, originalSize) {
   const convert = value => {
     const box = value.bbox ? { x:value.bbox.x0, y:value.bbox.y0, width:value.bbox.x1-value.bbox.x0, height:value.bbox.y1-value.bbox.y0 } : value;
@@ -131,7 +147,7 @@ class OcrReader {
     }
     return this.worker;
   }
-  async read(image, region, augments, {allowSmall=false,allowFallback=true,scale=1.5,invert=false}={}) {
+  async read(image, region, augments, {allowSmall=false,allowFallback=true,scale=1.5,invert=false,brightText=false}={}) {
     if(this.closed)throw new Error('识别已关闭');
     if (this.busy) throw new Error('识别正在进行，请稍候');
     this.busy = true;const started=performance.now(),capturedAt=new Date().toISOString();
@@ -142,6 +158,10 @@ class OcrReader {
         width: Math.floor(size.width * region.width), height: Math.floor(size.height * region.height) };
       let cropped = image.crop(rect);
       const cropSize = cropped.getSize();
+      if(brightText&&this.bitmapFactory){
+        const bitmap=brightTextBitmap(cropped.toBitmap(),typeof brightText==='number'?brightText:.86);
+        if(bitmap)cropped=this.bitmapFactory(bitmap,cropSize);
+      }
       // Small Chinese title strokes can be split into radicals by Windows OCR.
       // Enlarge the actual card crop before recognition, with the same cap used
       // for large captures. normalizeOcrLines maps the scaled boxes back.
@@ -198,4 +218,4 @@ class OcrReader {
   }
   async close() { this.closed=true;this.abortController.abort();await this.nativeWorker?.close();if (this.worker) await this.worker.terminate(); this.worker = null; }
 }
-module.exports = { OcrReader, WindowsOcrWorker, normalizeOcrLines };
+module.exports = { OcrReader, WindowsOcrWorker, normalizeOcrLines, brightTextBitmap };

@@ -24,4 +24,28 @@ const ULTIMATE_DEPENDENCIES = [
   {id:3118,key:'ArcaneAxiom',words:['返还你终极技能的部分总冷却时间']},
   {id:2134,key:'SurgeField',words:['施放终极技能时']},
 ];
-module.exports={CONVERSIONS,ULTIMATE_DEPENDENCIES};
+// The stat is the owner's input to an explicitly described mechanic. Merely
+// mentioning a target's maximum health never qualifies as own-health scaling.
+const SCALING_RULES = [
+  {id:1030,key:'ARAM_Eureka',words:['法术强度的技能急速'],stat:'ap',effect:'法术强度可继续供给技能急速'},
+  {id:1180,key:'ARAM_BigBrain',words:['每拥有1法术强度就会获得3护盾值'],stat:'ap',effect:'法术强度可供给该强化的护盾；刷新条件仍按强化说明'},
+  {id:2009,key:'ARAM_Zealot',words:['暴击几率','攻击速度（随法术强度变化）'],stat:'ap',effect:'法术强度参与该强化的暴击和攻速变化；未读取具体换算量'},
+  {id:1056,key:'ARAM_MindtoMatter',words:['最大生命值提升','一半的法力值'],stat:'mana',effect:'法力值可供给该强化的最大生命值提升'},
+  {id:1311,key:'ARAM_Overflow',words:['法力消耗翻倍','基于你的最大法力值'],stat:'mana',effect:'最大法力值参与技能增益；同时要承担翻倍的法力消耗'},
+  {id:1181,key:'ARAM_HeavyHitter',words:['相当于你3.5%最大生命值'],stat:'health',effect:'自身最大生命值参与普攻附加伤害；仍需要实际普攻命中'},
+  {id:2102,key:'PressureCooker',words:['受益于你的最大生命值'],stat:'health',effect:'自身最大生命值参与附近灼烧；需要接近对手'},
+  {id:1020,key:'ARAM_DawnbringersResolve',words:['回复共30%最大生命值'],stat:'health',effect:'自身最大生命值参与低血量回复；触发与重置仍按强化说明'},
+  {id:1344,key:'FinalForm',words:['施放你的终极技能时','最大生命值护盾'],stat:'health',effect:'自身最大生命值参与终极技能后的护盾；仍需要可用终极技能'},
+];
+const CRIT_MECHANICS = [
+  {id:1048,key:'ARAM_JeweledGauntlet',words:['技能可以造成暴击'],effect:'技能暴击'},
+  {id:3123,key:'JeweledBracelet',words:['技能可以暴击'],effect:'指定技能暴击'},
+  {id:1118,key:'ARAM_CriticalHealing',words:['治疗和护盾可以暴击'],effect:'治疗和护盾暴击'},
+  {id:2010,key:'ARAM_DoubleTap',words:['暴击施加一次额外的攻击特效'],effect:'暴击时额外触发攻击特效'},
+  {id:1328,key:'CriticalRhythm',words:['普攻在暴击时获得可叠加的攻击速度'],effect:'普攻暴击叠加攻速'},
+  {id:1356,key:'CriticalMissile',words:['当你暴击时，发射飞弹'],effect:'暴击触发飞弹'},
+  {id:1077,key:'ARAM_SoulSiphon',words:['暴击造成伤害的12%会等额治疗你自身'],effect:'暴击伤害自我治疗'},
+  {id:1092,key:'ARAM_Vulnerability',words:['装备效果和持续伤害效果可以暴击'],effect:'装备和持续伤害暴击'},
+];
+const matchesRule=(augment,rule)=>augment?.id===rule.id&&augment.key===rule.key&&typeof augment.description==='string'&&rule.words.every(word=>augment.description.replace(/\s/g,'').includes(word.replace(/\s/g,'')));
+module.exports={CONVERSIONS,ULTIMATE_DEPENDENCIES,SCALING_RULES,CRIT_MECHANICS,matchesRule};

@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {readOfferTitles,tightTitleRect,replaceSlot}=require('../src/core/title-reader.cjs');
+const {readOfferTitles,tightTitleRect,replaceSlot,titleInkGuard}=require('../src/core/title-reader.cjs');
 const region={x:.1,y:.3,width:.8,height:.12};
 const geometry={titles:[.15,.45,.75].map(x=>({x,y:.3,width:.15,height:.12})),cards:[.12,.42,.72].map(x=>({x,y:.18,width:.21,height:.48}))};
 const augments=[{id:1,name:'会心治疗'},{id:2,name:'小蜜蜂！！！'},{id:3,name:'升级：无尽之刃'}];
@@ -65,4 +65,37 @@ test('slot replacement carries native line geometry through to later exact match
   const source={text:'一 起',x:.2,y:.2,width:.2,height:.3,words:[{text:'一',x:.2,y:.3,width:.08,height:.04},{text:'起',x:.3,y:.2,width:.08,height:.3}]};
   const replaced=replaceSlot([], [source],{x:0,y:0,width:1,height:1});
   assert.ok(replaced.every(word=>word.rowY===source.y&&word.rowHeight===source.height));
+});
+
+test('same-pixel contrast retry can recover multiple slots and leaves already exact words intact',async()=>{
+  const calls=[],initial=lines();initial[0].text='会心冶疗';initial[1].text='小虫蜂';
+  const retry=lines();retry[2].text='错误标题';
+  const image={getSize:()=>({width:800,height:60}),toBitmap:()=>Buffer.alloc(800*60*4,255)};
+  const out=await readOfferTitles({...base,image,ocr:{read:async(...args)=>{calls.push(args);return {lines:calls.length===1?initial:retry};}}});
+  assert.equal(calls.length,2);assert.equal(calls[0][0],calls[1][0]);
+  assert.deepEqual(calls[1][1],{x:0,y:0,width:1,height:1});assert.equal(calls[1][3].brightText,.86);
+  assert.equal(calls[1][3].allowFallback,false);assert.deepEqual(out.offer.cards.map(card=>card.id),[1,2,3]);
+});
+
+test('uncovered title strokes reject an exact short-name hit instead of accepting a truncated longer title',()=>{
+  const width=800,height=60,pixels=Buffer.alloc(width*height*4);
+  for(let p=3;p<pixels.length;p+=4)pixels[p]=255;
+  // Two separated groups of bright strokes in one title area. An OCR box over
+  // only the first group cannot establish the complete title, even if its text
+  // happens to equal a different valid, shorter catalog name.
+  for(let y=18;y<30;y++)for(let x=70;x<180;x++)if(x%4<2){const p=(y*width+x)*4;pixels[p]=pixels[p+1]=pixels[p+2]=240;}
+  const guard=titleInkGuard({getSize:()=>({width,height}),toBitmap:()=>pixels},region,geometry);
+  const partial={...word('属性',0),width:.065},complete={...partial,width:.14};
+  assert.equal(guard([partial],0),false);assert.equal(guard([complete],0),true);
+  const shifted={...complete,y:.75};assert.equal(guard([shifted],0),false);
+});
+
+test('contrast retries still obey the four-read budget and invalidate when the window changes',async()=>{
+  const image={getSize:()=>({width:800,height:60}),toBitmap:()=>Buffer.alloc(800*60*4,255)};
+  let calls=0;
+  const out=await readOfferTitles({...base,image,ocr:{read:async()=>{calls++;return {lines:[]};}}});
+  assert.equal(out.reads,4);assert.equal(calls,4);
+  let active=true;calls=0;
+  await assert.rejects(readOfferTitles({...base,image,isCurrent:()=>active,ocr:{read:async()=>{if(++calls===2)active=false;return {lines:[]};}}}),/STALE/);
+  assert.equal(calls,2);
 });

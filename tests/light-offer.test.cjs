@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {titleOffer}=require('../src/core/light-offer.cjs');
+const {titleOffer,normalizeTitle}=require('../src/core/light-offer.cjs');
 const region={x:.1,y:.34,width:.8,height:.1};
 const geometry={titles:[.15,.45,.75].map(x=>({x,y:.34,width:.15,height:.1})),cards:[.12,.42,.72].map(x=>({x,y:.18,width:.21,height:.48}))};
 const catalog=[{id:1,name:'会心治疗'},{id:2,name:'小蜜蜂！！！'},{id:3,name:'升级：无尽之刃'}];
@@ -45,4 +45,20 @@ test('punctuation-only and normalization-colliding names remain unknown rather t
   const names=[{id:10,name:'罪恶快感！'},{id:11,name:'罪恶快感'},{id:12,name:'？？？'},catalog[2]];
   const out=titleOffer(r,region,geometry,names,'x');
   assert.equal(out.cards.length,0);assert.deepEqual(out.unknownSlots,[0,1]);
+});
+
+test('explicit traditional forms map to the same character without changing raw OCR or merging radicals',()=>{
+  const names=[{id:1,name:'叠角龙'},{id:2,name:'鲨鱼诱饵'},{id:3,name:'炼狱龙魂'}],r=result();
+  r.lines.forEach((line,index)=>line.text=['疊角龍','鯊鱼诱饵','炼獄龍魂'][index]);
+  const before=JSON.stringify(r),out=titleOffer(r,region,geometry,names,'x');
+  assert.deepEqual(out.cards.map(card=>card.id),[1,2,3]);assert.equal(JSON.stringify(r),before);
+  assert.equal(normalizeTitle('治疗'),'治疗');assert.equal(normalizeTitle('治療'),'治疗');
+  assert.notEqual(normalizeTitle('氵台疗'),normalizeTitle('治疗'));
+});
+
+test('traditional canonicalization cannot pick between two distinct catalog IDs',()=>{
+  const r=result();r.lines[0].text='疊角龍';
+  const names=[{id:1,name:'叠角龙'},{id:4,name:'疊角龍'},catalog[1],catalog[2]];
+  const out=titleOffer(r,region,geometry,names,'x');
+  assert.equal(out.cards.length,0);assert.deepEqual(out.unknownSlots,[0]);
 });
