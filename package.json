@@ -1,0 +1,24 @@
+{
+  "name": "hexthon",
+  "version": "0.1.0",
+  "description": "国服海克斯大乱斗外置助手 · OP.GG 资料与本地只读对局信息",
+  "private": true,
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "start:panel": "electron . --panel",
+    "test": "node --test tests/*.test.cjs",
+    "test:ui": "node scripts/run-smoke.cjs",
+    "sync": "node scripts/sync-data.cjs",
+    "package": "node scripts/package.cjs"
+  },
+  "engines": { "node": ">=22.12" },
+  "dependencies": {
+    "cheerio": "1.2.0",
+    "tesseract.js": "7.0.0"
+  },
+  "devDependencies": {
+    "electron": "45.2.1",
+    "@electron/packager": "20.3.0"
+  }
+}

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://opgg-static.akamaized.net data:; connect-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>Hexthon · 海克斯大乱斗助手</title><link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-icon">H</span><div>HEXTHON<small>海克斯大乱斗助手</small></div></div>
+    <div class="sidebar-label">你的随局资料库</div>
+    <nav aria-label="功能导航">
+      <button class="nav-button active" data-tab="augments"><span>◇</span> 强化符文 <b>01</b></button>
+      <button class="nav-button" data-tab="builds"><span>▤</span> 出装参考 <b>02</b></button>
+      <button class="nav-button" data-tab="settings"><span>⚙</span> 连接与浮层 <b>03</b></button>
+    </nav>
+    <div class="sidebar-bottom"><span class="quiet-dot"></span> 后台运行 · 鼠标穿透<p>Ctrl + Alt + H 打开面板<br>Ctrl + Alt + O 显示浮层<br>Ctrl + Alt + S 识别符文</p><span class="version">WINDOWS / v0.1.0</span></div>
+  </aside>
+  <main>
+    <header class="topbar"><div><span class="eyebrow">ARAM: MAYHEM</span><h1 id="page-title">每一次强化，都有据可查。</h1></div><div class="header-actions"><span id="patch" class="patch">OP.GG</span><button id="refresh" class="button quiet">↻ 更新资料</button><button id="overlay-toggle" class="button accent">显示浮层 ↗</button></div></header>
+    <div id="connection-strip" class="connection-strip" aria-live="polite"></div>
+    <section class="champion-bar" aria-label="当前英雄">
+      <div id="champion-summary" class="champion-summary"></div>
+      <div class="champion-picker"><label for="champion-search">查阅其他英雄</label><div><input id="champion-search" placeholder="名称 / 英文 / 常用别称" autocomplete="off"><select id="champion-select" aria-label="选择英雄"></select></div></div>
+      <button id="follow" class="button quiet">跟随游戏英雄</button>
+    </section>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <section id="tab-augments" class="tab-panel">
+      <div class="workspace">
+        <div class="library">
+          <div class="section-heading"><div><h2>强化符文资料</h2><p id="augment-scope">正在载入 OP.GG 资料…</p></div><button class="text-button" data-source="augments">在 OP.GG 查看 ↗</button></div>
+          <div class="filterbar"><div class="search-wrap"><span>⌕</span><input id="augment-search" placeholder="搜索强化符文名称或效果" autocomplete="off" aria-label="搜索强化符文"></div><span id="result-count"></span></div>
+          <div class="rarities" role="group" aria-label="符文品质"><button class="filter active" data-rarity="all">全部</button><button class="filter silver" data-rarity="1">白银</button><button class="filter gold" data-rarity="4">黄金</button><button class="filter prism" data-rarity="8">彩色</button></div>
+          <div id="augment-grid" class="augment-grid"></div>
+        </div>
+        <aside class="compare-panel">
+          <div class="section-heading"><div><span class="eyebrow">YOUR OPTIONS</span><h2>当前三选一</h2></div><button id="clear-offers" class="text-button">清空</button></div>
+          <p class="muted">添加游戏中看到的符文，对照英雄专属档位。</p>
+          <div id="offer-slots" class="offer-slots"></div>
+          <button id="scan" class="button accent full">◎ 识别游戏画面 <kbd>Ctrl Alt S</kbd></button>
+          <button id="import-image" class="button quiet full">从游戏截图识别</button>
+          <div id="ocr-results" class="ocr-results" aria-live="polite"></div>
+          <div class="data-note"><span>i</span><p>档位来自 OP.GG。未公开的胜率、样本量不做推算；名称中的「?」保留原文。</p></div>
+        </aside>
+      </div>
+    </section>
+    <section id="tab-builds" class="tab-panel" hidden><div class="section-heading"><div><h2>出装参考</h2><p>保留 OP.GG 页面顺序，结合本局情况自行选择。</p></div><button class="text-button" data-source="build">在 OP.GG 查看 ↗</button></div><div id="build-list"></div></section>
+    <section id="tab-settings" class="tab-panel" hidden>
+      <form id="settings-form">
+        <div class="settings-grid">
+          <section class="settings-card"><span class="eyebrow">01 / CONNECTION</span><h2>连接国服客户端</h2><p>自动发现 LeagueClient 本地连接。连接失败时，填写客户端 lockfile 文件或其所在文件夹。</p><label>客户端路径<input name="leaguePath" placeholder="D:\WeGameApps\英雄联盟\LeagueClient\lockfile"></label><label class="check-row"><input name="autoFollow" type="checkbox"> 自动跟随当前英雄</label><div id="diagnostics" class="diagnostics"></div><label class="check-row"><input id="confirm-mode" type="checkbox"> 我确认当前对局是海克斯大乱斗</label><small>仅在本地接口未返回队列时使用，对局结束后重置。</small></section>
+          <section class="settings-card"><span class="eyebrow">02 / OVERLAY</span><h2>你的外置浮层</h2><p>独立透明窗口，始终鼠标穿透。游戏需使用无边框或窗口模式。</p><label class="check-row"><input name="autoOverlay" type="checkbox"> 进入海克斯大乱斗时自动显示</label><label>显示器<select name="displayId" id="display-select"></select></label><label>位置<select name="anchor"><option value="top-right">右上角</option><option value="top-left">左上角</option><option value="bottom-right">右下角</option><option value="bottom-left">左下角</option></select></label><label>不透明度<input name="opacity" type="range" min="0.5" max="1" step="0.01"></label></section>
+          <section class="settings-card"><span class="eyebrow">03 / RECOGNITION</span><h2>本地中文识别</h2><p>优先使用 Windows 中文识别；不可用时下载备用模型。仅识别可见文字，图片不上传。</p><label class="check-row"><input name="autoScan" type="checkbox"> 对局中每 12 秒尝试识别（实验）</label><p>识别区域占游戏窗口的百分比。默认识别中央卡片区域，可按分辨率调整。</p><div class="region-inputs"><label>左侧 %<input type="number" name="ocrX" min="0" max="95" step="1" required></label><label>顶部 %<input type="number" name="ocrY" min="0" max="95" step="1" required></label><label>宽度 %<input type="number" name="ocrW" min="5" max="100" step="1" required></label><label>高度 %<input type="number" name="ocrH" min="5" max="100" step="1" required></label></div><small>模糊匹配会保留为待确认结果，不能保证每次识别成功。</small></section>
+          <section class="settings-card"><span class="eyebrow">04 / DATA</span><h2>资料与来源</h2><p>OP.GG 公开的海克斯大乱斗页面，每 6 小时过期；网络不可用时保留最近缓存。</p><div id="data-status" class="diagnostics"></div><p>OP.GG 页面数据不代表国服统计。不同服务器、补丁和翻译可能有差异。</p><p>控制面板只展示公开资料；客户端连接仅用于读取英雄、阶段和模式。</p><small>Hexthon 是独立的开发原型，未获 Riot、腾讯或 OP.GG 背书。</small></section>
+        </div>
+        <div class="settings-save"><span>关闭面板后继续在托盘运行。</span><button type="submit" class="button accent">保存设置</button></div>
+      </form>
+    </section>
+    <footer><span>资料来源 <button class="text-button" data-source="index">OP.GG ↗</button> · 海克斯大乱斗</span><span id="updated-at">正在载入…</span></footer>
+    <div class="legal">Hexthon isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.</div>
+  </main>
+  <div id="toast" role="status" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>
