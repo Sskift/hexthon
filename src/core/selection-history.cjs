@@ -55,7 +55,10 @@ class SelectionHistory {
     const heroChanged = this.championId && hero && hero !== this.championId;
     const restarted = this.gameTime !== null && time !== null && this.gameTime - time > 30;
     if (changed || heroChanged || restarted) this.reset();
-    const canRestore = !this.matchId && id && (hero || this.championId);
+    // LCU can identify the match before Live Client identifies our champion.
+    // Wait for both halves of that identity instead of consuming recovery on
+    // the first incomplete observation.
+    const canRestore = (!this.matchId || !this.championId) && id && (hero || this.championId);
     this.matchId = id || this.matchId;this.championId = hero || this.championId;
     if (time !== null) this.gameTime = time;
     const saved = canRestore ? sanitizeHistory(persisted,this.now()) : null;
@@ -68,7 +71,9 @@ class SelectionHistory {
         if(!this.entries.has(entry.id)||this.entries.get(entry.id).observedAt<=entry.observedAt)this.entries.set(entry.id,{...entry});
       }
       if(!hasCorrection){
-        this.manualIds = new Set(saved.manualIds.filter(id => this.known(id)));
+        // Newer slot evidence was merged above. A restored manual inclusion
+        // must not resurrect the augment that this evidence just replaced.
+        this.manualIds = new Set(saved.manualIds.filter(id => this.known(id) && this.entries.get(id)?.active !== false));
         this.excludedIds = new Set(saved.excludedIds.filter(id => this.known(id)));
       }
       this.restored = true;
@@ -151,11 +156,13 @@ class SelectionHistory {
 }
 
 class SelectionHistoryStore {
-  constructor(filename,{now=Date.now}={}) {this.filename=path.resolve(filename);this.now=now;this.queue=Promise.resolve();}
+  constructor(filename,{now=Date.now,io=fs}={}) {
+    this.filename=path.resolve(filename);this.now=now;this.io=io;this.queue=Promise.resolve();this.lastError=null;
+  }
   async load() {
     await this.queue.catch(()=>{});
     try {
-      const file=await fs.open(this.filename,'r');
+      const file=await this.io.open(this.filename,'r');
       try {
         if((await file.stat()).size>MAX_BYTES)return null;
         const buffer=Buffer.alloc(MAX_BYTES+1);const {bytesRead}=await file.read(buffer,0,buffer.length,0);
@@ -170,13 +177,20 @@ class SelectionHistoryStore {
     if(payload!==null&&!safe)return Promise.reject(new Error('INVALID_HISTORY'));
     const encoded=safe?JSON.stringify(safe):null;
     const run=async()=>{
-      if(encoded===null){await fs.unlink(this.filename).catch(error=>{if(error.code!=='ENOENT')throw error;});return;}
+      if(encoded===null){await this.io.unlink(this.filename).catch(error=>{if(error.code!=='ENOENT')throw error;});return;}
       const temporary=`${this.filename}.${process.pid}.tmp`;
-      await fs.mkdir(path.dirname(this.filename),{recursive:true});
-      try {await fs.writeFile(temporary,encoded,{encoding:'utf8',mode:0o600});await fs.rename(temporary,this.filename);}
-      finally {await fs.unlink(temporary).catch(()=>{});}
+      await this.io.mkdir(path.dirname(this.filename),{recursive:true});
+      try {await this.io.writeFile(temporary,encoded,{encoding:'utf8',mode:0o600});await this.io.rename(temporary,this.filename);}
+      finally {await this.io.unlink(temporary).catch(()=>{});}
     };
-    const pending=this.queue.then(run,run);this.queue=pending.catch(()=>{});return pending;
+    const pending=this.queue.then(run,run);
+    this.queue=pending.then(()=>{this.lastError=null;},error=>{this.lastError=error;});
+    return pending;
+  }
+  async flush() {
+    // A save queued while waiting must also settle before callers quit.
+    let pending;do{pending=this.queue;await pending;}while(pending!==this.queue);
+    if(this.lastError)throw this.lastError;
   }
 }
 module.exports={SelectionHistory,SelectionHistoryStore,sanitizeHistory};

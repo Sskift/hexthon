@@ -5,6 +5,29 @@ const aliases = { ahri:'阿狸 狐狸', ashe:'艾希 寒冰', brand:'布兰德 �
 const rarity = { 1:'白银', 4:'黄金', 8:'彩色' };
 const phases = { Disconnected:'等待客户端', None:'客户端空闲', Lobby:'组队大厅', Matchmaking:'匹配中', ReadyCheck:'确认对局', ChampSelect:'英雄选择', GameStart:'载入对局', InProgress:'对局进行中', WaitingForStats:'等待结算', EndOfGame:'对局结束', Reconnect:'等待重连' };
 let state, filter = 'all', tab = 'augments', toastTimer, lastSettings = '', lastAugments = '', lastBuilds = '', lastPhase;
+function recognitionView(snapshot) {
+  const apiOnly=snapshot.recognitionMode==='api',paused=!apiOnly&&snapshot.settings?.autoScan===false;
+  const failure=!apiOnly&&!paused&&snapshot.ocr?.status==='error';
+  let error=String(snapshot.ocr?.message||'识别暂不可用，稍后自动重试。');
+  if(/^NATIVE_OCR_/.test(error))error='Windows 文字识别暂不可用，稍后自动重试。';
+  else if(/^WINDOW_CAPTURE_/.test(error))error='游戏画面暂不可用，窗口恢复后将自动重试。';
+  else if(/^STALE_|已过期/.test(error))error='场景已变化，正在等待新的识别画面。';
+  const prompts=snapshot.settings?.autoOverlay!==false;
+  return {apiOnly,paused,failure,error:failure?error:'',
+    heading:apiOnly?'本地接口模式 · 无画面采集':paused?'自动识别已暂停':failure?'自动识别暂不可用':'自动识别运行中',
+    chip:apiOnly?'API':paused?'PAUSED':failure?'RETRY':'AUTO',
+    modeLabel:apiOnly?'本地接口 · 无画面采集':paused?'识别已暂停 · 接口仍可更新':'自动识别 · 场景提示',
+    status:paused?'已暂停画面识别和场景提示；本机接口仍会更新英雄与装备。':failure?error:snapshot.autoStatus||'',
+    toggleLabel:snapshot.recognitionMode==='visual'?(snapshot.overlayEnabled?'隐藏场景提示':'显示场景提示'):paused?(prompts?'恢复识别与提示':'恢复自动识别'):(prompts?'暂停识别与提示':'暂停自动识别'),
+    scanDisabled:apiOnly||paused||snapshot.ocr?.status==='running',
+  };
+}
+function runtimeWarnings(snapshot,recognition=recognitionView(snapshot)) {
+  return [...new Set([snapshot.error,snapshot.connectionError,snapshot.monitorError,recognition.error,
+    snapshot.augmentMeta?.warning,snapshot.buildMeta?.warning,
+    snapshot.selectionRecovery?.saveFailed?'本局强化记录保存失败，重启后可能无法完整恢复；当前记录仍保留。':'',
+  ].filter(Boolean))];
+}
 function tier(a) { return `<span class="tier ${a.tier === 0 ? 'top' : a.tier === 1 ? 'high' : ''}">${a.tier == null ? '—' : `T${a.tier}`}</span>`; }
 function image(a, extra = '') { const local=state?.imageAssets?.[a.image?.split('?')[0]];const src=local?`../../assets/opgg/${local}`:a.image;return src?`<img src="${escapeHtml(src)}" alt="" ${extra}>`:''; }
 function time(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12:false }) : '暂无'; }
@@ -33,23 +56,23 @@ function renderChampions() {
 function render() {
   if (!state) return;
   const c = state.selectedChampion, g = state.game;
-  const apiOnly=state.recognitionMode==='api';
+  const recognition=recognitionView(state),apiOnly=recognition.apiOnly;
   if(g.phase!==lastPhase){if(g.phase==='ChampSelect')setTab('draft');else if(g.phase==='InProgress')setTab('augments');lastPhase=g.phase;}
-  $('auto-status').textContent = state.autoStatus || (g.liveConnected ? '已连接游戏，正在自动检查强化卡片与构筑变化。' : g.lcuConnected ? '已连接客户端，等待进入选人或对局。' : '等待英雄联盟窗口，进入选人或对局后自动跟随。');
-  document.querySelector('.auto-banner strong').textContent = apiOnly?'本地接口模式 · 无画面采集':state.settings.autoScan===false ? '自动识别已暂停' : '自动识别运行中';
-  document.querySelector('.auto-chip').textContent=apiOnly?'API':'AUTO';
-  $('runtime-mode-label').textContent=apiOnly?'本地接口 · 无画面采集':'自动识别 · 场景提示';
-  $('scene-description').textContent=apiOnly?'当前接口模式不显示游戏浮层。已知海克斯记录按局保存；未取得的数据保持未知。':'选卡时显示卡片附近评分，商店打开时在旁边空位显示出装建议；选人提示放在客户端旁的桌面空位。没有足够空间时隐藏。';
+  $('auto-status').textContent = recognition.status || (g.liveConnected ? '已连接游戏，正在自动检查强化卡片与构筑变化。' : g.lcuConnected ? '已连接客户端，等待进入选人或对局。' : '等待英雄联盟窗口，进入选人或对局后自动跟随。');
+  document.querySelector('.auto-banner strong').textContent = recognition.heading;
+  document.querySelector('.auto-chip').textContent=recognition.chip;
+  $('runtime-mode-label').textContent=recognition.modeLabel;
+  $('scene-description').textContent=apiOnly?'当前接口模式不显示游戏浮层。已知海克斯记录按局保存；未取得的数据保持未知。':recognition.paused?'识别与场景提示已暂停。恢复后，仅在选卡、商店和选人界面的合适空位显示建议。':'选卡时显示卡片附近评分，商店打开时在旁边空位显示出装建议；选人提示放在客户端旁的桌面空位。没有足够空间时隐藏。';
   $('performance-title').textContent=apiOnly?'不采集游戏画面':'小区域识别，按需处理';
-  $('performance-description').textContent=apiOnly?'后台只请求本机接口，不启动画面采集、OCR 或图标匹配。':'仅在游戏前台读取局部区域；标题不变时复用结果，已选图标在后台线程校验。识别有时间与次数上限，不保存画面或录制视频。';
+  $('performance-description').textContent=apiOnly?'后台只请求本机接口，不启动画面采集、OCR 或图标匹配。':recognition.paused?'画面识别已暂停，本机接口仍可更新。恢复后只读取游戏前台的局部区域，不保存画面或录制视频。':'仅在游戏前台读取局部区域；标题不变时复用结果，已选图标在后台线程校验。识别有时间与次数上限，不保存画面或录制视频。';
   document.querySelector('.legacy-visual-settings').hidden=apiOnly;
   document.querySelector('.legacy-recognition-settings').hidden=apiOnly;
   document.querySelector('.region-inputs').hidden=state.recognitionMode==='visual-light';
   $('patch').textContent = `PATCH ${state.augmentMeta?.patch || state.catalog?.patch || '—'}`;
-  $('overlay-toggle').textContent = state.overlayEnabled ? '暂停识别与提示' : '恢复识别与提示';
+  $('overlay-toggle').textContent = recognition.toggleLabel;
   $('overlay-toggle').hidden=apiOnly;
   $('scan').hidden=apiOnly;
-  $('scan').textContent='立即检查当前游戏场景';
+  $('scan').textContent=recognition.paused?'恢复自动识别后可检查':'立即检查当前游戏场景';
   document.querySelector('input[name=autoScan]').disabled=apiOnly;
   document.querySelector('.recognition-tools').hidden=apiOnly;
   const online = g.lcuConnected || g.liveConnected;
@@ -58,7 +81,7 @@ function render() {
   $('champion-summary').innerHTML = c ? `${image(c)}<div><h2>${escapeHtml(c.name)}</h2><p>${following?'正在跟随游戏':'当前查阅'} · ${escapeHtml(c.key)} ${g.level&&following?`· Lv.${g.level}`:''}</p></div>` : '<p>选择一个英雄开始查阅</p>';
   if (document.activeElement !== $('champion-select') && document.activeElement !== $('champion-search')) renderChampions();
   $('follow').textContent = state.settings.autoFollow ? (following?'正在自动跟随':'自动跟随已开启') : '跟随游戏英雄';
-  const warnings = [state.error, state.augmentMeta?.warning, state.buildMeta?.warning].filter(Boolean);
+  const warnings = runtimeWarnings(state,recognition);
   if (state.augmentMeta?.patch && state.buildMeta?.patch && state.augmentMeta.patch !== state.buildMeta.patch) warnings.push('强化符文与出装来自不同补丁，请更新资料后对照使用');
   $('notice').hidden = !warnings.length; $('notice').textContent = [...new Set(warnings)].join('；');
   $('augment-scope').textContent = state.loading ? '正在获取英雄专属资料；暂显示通用档位…' : state.augmentMeta ? `${c?.name}专属档位 · 按构筑推荐指数排序` : '通用档位 · 暂无该英雄专属数据';
@@ -87,7 +110,7 @@ function renderOffers() {
   const reroll=state.reroll;
   $('reroll-advice').innerHTML=reroll?`<span>重随参考</span><strong>${escapeHtml(reroll.label||reroll.advice||'等待充分信息')}</strong><p>${escapeHtml(reroll.reason||'')}</p>`:'<span>重随参考</span><p>识别到完整选项后，比较同品质符文池与当前构筑。</p>';
   if(state.recognitionMode==='api'&&!state.offeredIds.length)$('reroll-advice').innerHTML='<span>海克斯资料</span><strong>当前接口未提供完整选项</strong><p>画面采集已停用。部分技能型海克斯可通过本地接口识别，普通被动海克斯仍可能缺失。</p>';
-  $('scan').disabled = o.status === 'running'; $('import-image').disabled = o.status === 'running';
+  $('scan').disabled = recognitionView(state).scanDisabled; $('import-image').disabled = o.status === 'running';
   $('ocr-results').innerHTML = o.status === 'idle' ? '' : `<p>${escapeHtml(o.message || '')}</p>${(o.matches||[]).map(m => `<div class="ocr-candidate"><span>${escapeHtml(m.name)} · ${m.exact?'名称匹配':`待确认 ${m.confidence}%`}</span><button data-offer="${m.id}">比较</button></div>`).join('')}${o.text?`<details><summary>查看识别原文</summary><pre>${escapeHtml(o.text)}</pre></details>`:''}`;
 }
 function renderBuilds() {

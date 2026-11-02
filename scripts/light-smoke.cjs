@@ -44,7 +44,7 @@ async function runLightSmoke(t){
   await api('window.hexthon.toggleOverlay()');assert.equal(t.snapshot().settings.autoScan,false);
   await api('window.hexthon.toggleOverlay()');assert.equal(t.snapshot().settings.autoScan,true);
   t.resetGame();assert.equal(state.selectedAugments.length,0);
-  assert.ok([t.panel,t.overlay,t.draftWindow,...t.cardWindows].every(w=>!w.isVisible()));
+  assert.ok([t.panel,t.overlay,t.draftWindow,...t.cardWindows].every(w=>w.isDestroyed()||!w.isVisible()));
   const report={passed:true,syntheticOnly:true,actualWindowCapture:false,visibleWindows:0,captures,
     checks:['fresh three-card stability','unchanged-title OCR cache','one-absence overlay hide','two-absence inferred selection','partial history status','fresh independent shop strips','shop-close hide','focus invalidation','undo correction','pause/resume capture','new-game reset']};
   await fs.writeFile(path.join(root,'.qa/light-smoke.json'),JSON.stringify(report,null,2));

@@ -34,6 +34,20 @@ test('late reliable game ID merges saved records with newer partial observations
   const restored=current.begin({...context,gameTime:111},payload);
   assert.deepEqual(restored.selected.map(a=>a.id),[1,2,3]);assert.equal(restored.selected[0].slot,'hud:0');assert.equal(restored.selected[0].confidence,'api');
 });
+test('match ID arriving before champion identity does not consume the recovery opportunity',()=>{
+  const old=history();old.begin(context);old.observe({id:1,source:'api'});
+  const payload=old.serialize(),current=history();
+  assert.equal(current.begin({...context,championId:null},payload).selected.length,0);
+  const restored=current.begin(context,payload);
+  assert.deepEqual(restored.selected.map(a=>a.id),[1]);assert.equal(restored.restored,true);
+});
+test('late recovery cannot resurrect a saved manual inclusion replaced by newer slot evidence',()=>{
+  const old=history();old.begin(context);old.observe({id:1,source:'visual',slot:'hud:0'});old.confirm(1);
+  const payload=old.serialize();time+=100;
+  const current=history();current.begin({championId:103,gameTime:110});current.observe({id:2,source:'visual',slot:'hud:0'});
+  assert.deepEqual(current.begin({...context,gameTime:110},payload).selected.map(a=>a.id),[2]);
+  const reloaded=history();assert.deepEqual(reloaded.begin({...context,gameTime:111},current.serialize()).selected.map(a=>a.id),[2]);
+});
 test('evidence upgrades without downgrade; stable slot replacement retires stale partial API observations',()=>{
   const h=history();h.begin(context);
   h.observe({id:1,source:'inferred',slot:'hud:0'});assert.equal(h.snapshot().selected[0].slot,null);
